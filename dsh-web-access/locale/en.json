@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "Web access",
+    "description": "Open this Harness to other devices on a chosen interface, control which hosts are trusted, and optionally require a TOTP one-time code before connecting. Adds a Web access panel to the sidebar."
+  },
+  "panel": "Web access",
+  "title": "Web access and connection verification"
+}

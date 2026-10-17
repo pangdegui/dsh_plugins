@@ -1,0 +1,5 @@
+# dsh-session-delete bundle layer: one Host row carrying both halves.
+# The row id is stable so profile patches and re-adds can target it.
+- insert:
+    - id: session-delete
+      name: dsh-session-delete

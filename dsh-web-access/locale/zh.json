@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "Web 访问与连接验证",
+    "description": "把本机 Harness 开放到指定网络接口,控制哪些主机被信任,并可选地要求 TOTP 动态验证码后才能连接。在侧栏添加一个「Web 访问」面板。"
+  },
+  "panel": "Web 访问",
+  "title": "Web 访问与连接验证"
+}

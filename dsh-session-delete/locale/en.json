@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Delete",
+    "description": "Permanently delete a session from the sidebar Session menu, including its log, projection cache, workspace accounting and spill files."
+  }
+}

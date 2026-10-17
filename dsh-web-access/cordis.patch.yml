@@ -1,0 +1,12 @@
+# dsh-web-access bundle layer: one Host row carrying both halves.
+# `config` is spelled out so the plugin always receives a concrete object even
+# before the first settings write; the values match this schema's defaults.
+- insert:
+    - id: web-access
+      name: dsh-web-access
+      config:
+        bind: '127.0.0.1'
+        autoTrustLocalIps: true
+        trustedHosts: []
+        totpEnabled: false
+        totpGate: all
