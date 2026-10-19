@@ -11,16 +11,11 @@
  *      machinery renders a native form; the values are the single source of
  *      truth for how far this profile is reachable.
  *
- *   2. Reconciliation. `bind` and the trust fence are properties of *other*
- *      entries (`webserver`, `connection`), not of this plugin. Those rows come
- *      from a bundle's `insert:` group, which `configEditor` cannot address on
- *      every dsh build (`entries()` only returns rows the profile patch owns),
- *      so editor-based edits vanished silently. This plugin therefore writes a
- *      **managed block** into the profile patch — the same rows a person would
- *      write by hand — and the application's patch watcher applies that layer.
- *      A listener can only be re-bound by `Service.init`, so the panel reports
- *      `restartRequired` instead of pretending the change already took effect;
- *      the next start binds the configured address.
+ *   2. Reachability. dsh 0.2.1 rejects a wildcard bind at startup and the
+ *      desktop host hardcodes `http://127.0.0.1:<port>` for its window, so the
+ *      listener is never re-bound. Instead this plugin runs a small reverse
+ *      proxy on a concrete LAN address at the same port, forwarding to the
+ *      loopback listener and writing only the trust-fence row the proxy needs.
  *
  *   3. The TOTP gate. A script-free login entry (`/dsh-access`) verifies a
  *      time-based one-time password and then hands back the process launch
@@ -45,6 +40,8 @@
 
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
+import http from 'node:http'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -68,8 +65,11 @@ export const inject = []
  * panel over its own routes, so it wants plain validated values.
  */
 export const Config = z.object({
-  /** The bind address the webserver should listen on. */
+  /** `0.0.0.0` means "serve the LAN through the built-in proxy"; it never
+   *  becomes a wildcard listener (dsh rejects that at startup). */
   bind: z.union([z.const('127.0.0.1'), z.const('0.0.0.0')]).default('127.0.0.1'),
+  /** LAN address the proxy listens on; empty picks the primary private IPv4. */
+  lanAddress: z.string().default(''),
   /** Trust this machine's own non-internal IPv4 addresses as hosts. */
   autoTrustLocalIps: z.boolean().default(true),
   /** Extra authorities the browser-trust fence accepts (`host`, `host:port`). */
@@ -136,26 +136,32 @@ function loadSecret({ create = false } = {}) {
   return secret
 }
 
-// --- reconciliation ----------------------------------------------------------
+// --- LAN reachability ---------------------------------------------------------
+//
+// Two facts rule out the obvious designs on this dsh build:
+//
+//   1. `dsh-host-webserver` rejects a wildcard bind outright — the config
+//      validator throws `host "0.0.0.0" is an unspecified (wildcard) address`,
+//      which is a *required* plugin failure, so the whole application refuses
+//      to start. Never write `0.0.0.0` into `webserver.host`.
+//   2. The desktop host hardcodes `http://127.0.0.1:<port>` for its Electron
+//      window, so re-binding the listener to the LAN address would leave the
+//      window pointing at a socket nobody listens on.
+//
+// The reachable design is therefore a reverse proxy: the application keeps its
+// loopback listener (window included), and this plugin accepts LAN traffic on
+// the same port at a concrete LAN address and forwards it. Only the trust-fence
+// row is written to the profile patch; the listener is never re-bound, so no
+// setting this plugin stores can keep the application from starting.
 
-/**
- * The managed block: listener rows this plugin owns inside the profile patch.
- *
- * `configEditor` can only address entries the profile patch itself declares,
- * and `webserver` / `connection` come from a bundle's `insert:` group. Rewriting
- * them through the editor therefore failed silently on dsh 0.2.1, which left
- * the server on loopback no matter what `bind` said. Writing the rows where a
- * person would write them is the version-independent path: the application
- * watches this file and applies the layer, and the rows are read when the
- * listener starts.
- */
 const MANAGED_START = '# >>> dsh-web-access managed rows (do not edit) >>>'
 const MANAGED_END = '# <<< dsh-web-access managed rows <<<'
 
 /** Last managed-block write, surfaced by the panel. */
 let lastManaged = { path: null, changed: false, at: 0, error: null }
-/** Whether the running listener still owes a restart to honor `bind`. */
-let restartRequired = false
+
+/** The LAN-facing proxy: bound to one concrete LAN address, never to 0.0.0.0. */
+const proxyState = { server: null, host: null, port: null, listening: false, error: null }
 
 /** This machine's non-internal IPv4 addresses, the same set upstream derives. */
 function localIpv4Addresses() {
@@ -165,34 +171,55 @@ function localIpv4Addresses() {
     .map((iface) => iface.address)
 }
 
+/**
+ * The address LAN clients should use.
+ *
+ * An explicit `lanAddress` wins; otherwise prefer a private 192.168/10 address
+ * over the 172.16/12 range, because the latter is where Hyper-V and WSL
+ * switches live and those are not reachable from the house network.
+ */
+function pickLanAddress(config) {
+  const explicit = typeof config.lanAddress === 'string' ? config.lanAddress.trim() : ''
+  if (explicit !== '') return explicit
+  const addresses = localIpv4Addresses()
+  return addresses.find((address) => address.startsWith('192.168.'))
+    ?? addresses.find((address) => address.startsWith('10.'))
+    ?? addresses.find((address) => !/^172\.(1[6-9]|2\d|3[01])\./u.test(address))
+    ?? addresses[0]
+    ?? null
+}
+
 /** Authorities the trust fence must accept for the configured reach. */
 function trustedAuthorities(config) {
-  const merged = [
-    ...(config.autoTrustLocalIps && config.bind === '0.0.0.0' ? localIpv4Addresses() : []),
-    ...config.trustedHosts,
-  ]
+  const merged = []
+  if (config.bind !== '127.0.0.1') {
+    const address = pickLanAddress(config)
+    if (address !== null) merged.push(address)
+    if (config.autoTrustLocalIps) merged.push(...localIpv4Addresses())
+  }
+  merged.push(...config.trustedHosts)
   return [...new Set(merged.map((entry) => (typeof entry === 'string' ? entry.trim() : '')).filter((entry) => entry !== ''))]
 }
 
 /**
- * The YAML rows that make the listener and the fence follow this plugin.
- * @returns the row document, or '' when loopback needs no rows at all.
+ * The YAML rows this plugin owns in the profile patch.
+ *
+ * Only the fence needs a row: the proxy serves `http://<lan>:<port>`, and the
+ * fence compares that authority against the listener's loopback bind, so the
+ * LAN address has to be named explicitly. `webserver` is deliberately absent —
+ * re-binding it is what broke startup.
  */
 function managedRows(config) {
-  if (config.bind !== '0.0.0.0') return ''
   const authorities = trustedAuthorities(config)
+  if (authorities.length === 0) return ''
   const lines = [
-    '# Pinned here because the Loader cannot re-bind a bundled row through',
-    '# configEditor: these rows take effect when the listener starts.',
-    '- id: webserver',
+    '# Authorities the browser-trust fence accepts for LAN access. The',
+    "# application's own listener stays on loopback and is never re-bound.",
+    '- id: connection',
     '  config:',
-    '    host: 0.0.0.0',
-    '    port: !!js ctx.webStartup.port ?? 3080',
+    '    trustedHosts:',
   ]
-  if (authorities.length > 0) {
-    lines.push('- id: connection', '  config:', '    trustedHosts:')
-    for (const authority of authorities) lines.push(`      - ${JSON.stringify(authority)}`)
-  }
+  for (const authority of authorities) lines.push(`      - ${JSON.stringify(authority)}`)
   return lines.join('\n')
 }
 
@@ -252,18 +279,110 @@ function syncManagedRows(ctx, config) {
   return lastManaged
 }
 
-/** Apply the configured reach and record whether a restart is still owed. */
+// --- the LAN proxy -----------------------------------------------------------
+
+/** Forward one ordinary HTTP request to the loopback listener, Host intact. */
+function forwardHttp(req, res, port) {
+  const upstream = http.request({
+    host: '127.0.0.1',
+    port,
+    method: req.method,
+    path: req.url,
+    headers: req.headers,
+  }, (answer) => {
+    res.writeHead(answer.statusCode ?? 502, answer.headers)
+    answer.pipe(res)
+  })
+  upstream.on('error', () => {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('dsh-web-access: the local Harness listener is unavailable\n')
+    } else {
+      res.destroy()
+    }
+  })
+  req.on('error', () => upstream.destroy())
+  req.pipe(upstream)
+}
+
+/** Tunnel one upgraded connection (WebSocket) with its original handshake. */
+function forwardUpgrade(req, socket, head, port) {
+  const upstream = net.connect(port, '127.0.0.1', () => {
+    const lines = [`${req.method} ${req.url} HTTP/1.1`]
+    for (let index = 0; index < req.rawHeaders.length; index += 2) {
+      lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`)
+    }
+    upstream.write(`${lines.join('\r\n')}\r\n\r\n`)
+    if (head !== undefined && head.length > 0) upstream.write(head)
+    upstream.pipe(socket)
+    socket.pipe(upstream)
+  })
+  upstream.on('error', () => socket.destroy())
+  socket.on('error', () => upstream.destroy())
+}
+
+/** Start (or keep) the LAN listener; never throws and never blocks startup. */
+function startProxy(ctx, config) {
+  if (config.bind === '127.0.0.1') {
+    stopProxy()
+    return
+  }
+  const port = ctx.get('webServer')?.port
+  const host = pickLanAddress(config)
+  if (typeof port !== 'number' || host === null) {
+    proxyState.error = typeof port !== 'number'
+      ? 'the local listener has no port yet'
+      : 'this machine has no LAN IPv4 address'
+    return
+  }
+  if (proxyState.server !== null && proxyState.host === host && proxyState.port === port) return
+  stopProxy()
+  const server = http.createServer((req, res) => forwardHttp(req, res, port))
+  server.on('upgrade', (req, socket, head) => forwardUpgrade(req, socket, head, port))
+  server.on('clientError', (_error, socket) => {
+    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+  })
+  server.once('error', (error) => {
+    proxyState.server = null
+    proxyState.host = null
+    proxyState.port = null
+    proxyState.listening = false
+    proxyState.error = String(error.message ?? error)
+    ctx.logger?.warn?.('web-access: LAN proxy could not listen on %s:%s: %s', host, port, proxyState.error)
+  })
+  server.once('listening', () => {
+    proxyState.listening = true
+    proxyState.error = null
+    ctx.logger?.info?.('web-access: LAN proxy listening on http://%s:%s', host, port)
+  })
+  proxyState.server = server
+  proxyState.host = host
+  proxyState.port = port
+  proxyState.listening = false
+  proxyState.error = null
+  server.listen(port, host)
+}
+
+/** Close the LAN listener, if one is open. */
+function stopProxy() {
+  const server = proxyState.server
+  proxyState.server = null
+  proxyState.host = null
+  proxyState.port = null
+  proxyState.listening = false
+  if (server === null) return
+  try {
+    server.closeAllConnections?.()
+    server.close()
+  } catch {
+    // closing an already-closed server is not worth surfacing
+  }
+}
+
+/** Apply the configured reach: fence row first, then the LAN listener. */
 async function reconcile(ctx, config) {
   syncManagedRows(ctx, config)
-  const liveHost = ctx.get('webServer')?.host
-  restartRequired = typeof liveHost === 'string' && liveHost !== config.bind
-  if (restartRequired) {
-    ctx.logger?.warn?.(
-      'web-access: listener is on %s, configured %s; the managed rows apply on the next start',
-      liveHost,
-      config.bind,
-    )
-  }
+  startProxy(ctx, config)
   if (lastManaged.error !== null) {
     ctx.logger?.warn?.('web-access: managed rows were not written: %s', lastManaged.error)
   }
@@ -422,17 +541,19 @@ function noticePage(title, body) {
 // --- provisioning ------------------------------------------------------------
 
 /** Addresses another device can actually use to reach this server. */
-function reachableOrigins(ctx) {
-  const server = ctx.get('webServer')
-  const port = server?.port
+function reachableOrigins(ctx, config) {
+  const port = ctx.get('webServer')?.port
   if (typeof port !== 'number') return []
-  const bind = typeof server.host === 'string' ? server.host : '127.0.0.1'
-  const hosts = bind === '0.0.0.0' ? localIpv4Addresses() : [bind]
-  return hosts.map((host) => `http://${host}:${String(port)}`)
+  if (config.bind !== '127.0.0.1') {
+    const host = proxyState.host ?? pickLanAddress(config)
+    return host === null ? [] : [`http://${host}:${String(port)}`]
+  }
+  const host = typeof ctx.get('webServer')?.host === 'string' ? ctx.get('webServer').host : '127.0.0.1'
+  return [`http://${host}:${String(port)}`]
 }
 
 function setupPayload(ctx, config, secret) {
-  const origins = reachableOrigins(ctx)
+  const origins = reachableOrigins(ctx, config)
   return {
     enabled: config.totpEnabled === true,
     gate: config.totpGate,
@@ -441,7 +562,7 @@ function setupPayload(ctx, config, secret) {
     secret: base32Encode(secret),
     otpauth: otpauthUri(secret, os.hostname()),
     trust: {
-      localIps: config.autoTrustLocalIps && config.bind === '0.0.0.0' ? localIpv4Addresses() : [],
+      localIps: config.bind !== '127.0.0.1' && config.autoTrustLocalIps ? localIpv4Addresses() : [],
       extra: config.trustedHosts,
       live: [...(ctx.get('connection')?.trustedHosts ?? [])],
     },
@@ -465,10 +586,11 @@ let lastSaveAt = 0
 
 /** The editable configuration plus the live status the panel renders. */
 function configPayload(ctx, config) {
-  const origins = reachableOrigins(ctx)
+  const origins = reachableOrigins(ctx, config)
   return {
     config: {
       bind: config.bind,
+      lanAddress: config.lanAddress,
       autoTrustLocalIps: config.autoTrustLocalIps,
       trustedHosts: config.trustedHosts,
       totpEnabled: config.totpEnabled,
@@ -477,6 +599,13 @@ function configPayload(ctx, config) {
     status: {
       host: ctx.get('webServer')?.host ?? null,
       port: ctx.get('webServer')?.port ?? null,
+      /** The LAN-facing proxy this plugin runs, and why it is not listening. */
+      lan: {
+        address: proxyState.host,
+        port: proxyState.port,
+        listening: proxyState.listening,
+        error: proxyState.error,
+      },
       trustLive: [...(ctx.get('connection')?.trustedHosts ?? [])],
       localIps: localIpv4Addresses(),
       origins,
@@ -497,8 +626,6 @@ function configPayload(ctx, config) {
       })(),
       lastSaveError,
       lastSaveAt,
-      /** True when the running listener still needs a restart to honor `bind`. */
-      restartRequired,
       /** What the managed block write did on this process. */
       managed: {
         path: lastManaged.path,
@@ -530,6 +657,13 @@ function validatePatch(body) {
   if (body.autoTrustLocalIps !== undefined) {
     if (typeof body.autoTrustLocalIps !== 'boolean') throw new HttpError(400, 'autoTrustLocalIps must be a boolean')
     patch.autoTrustLocalIps = body.autoTrustLocalIps
+  }
+  if (body.lanAddress !== undefined) {
+    const value = typeof body.lanAddress === 'string' ? body.lanAddress.trim() : body.lanAddress
+    if (value !== '' && !/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(String(value))) {
+      throw new HttpError(400, `lanAddress must be an IPv4 address or empty (received ${JSON.stringify(body.lanAddress)})`)
+    }
+    patch.lanAddress = value
   }
   if (body.trustedHosts !== undefined) {
     if (!Array.isArray(body.trustedHosts)) throw new HttpError(400, 'trustedHosts must be an array')
@@ -740,6 +874,7 @@ export function apply(ctx, config) {
   // panel turns a valid setting into a rejected write.
   const resolved = {
     bind: settings.bind === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1',
+    lanAddress: typeof settings.lanAddress === 'string' ? settings.lanAddress.trim() : '',
     autoTrustLocalIps: settings.autoTrustLocalIps !== false,
     trustedHosts: Array.isArray(settings.trustedHosts)
       ? settings.trustedHosts.filter((entry) => typeof entry === 'string' && entry.trim() !== '')
@@ -748,18 +883,20 @@ export function apply(ctx, config) {
     totpGate: settings.totpGate === 'remote' ? 'remote' : 'all',
   }
 
-  // The fence and the bind belong to other entries; adopt them once the
+  // The fence and the listener belong to other entries; adopt them once the
   // services they live on exist, so a late or absent one never blocks load.
   // `profileContext` carries the patch path the managed rows live in.
   ctx.inject(['webServer', 'profileContext'], (webCtx) => {
     registerRoutes(webCtx, resolved)
-    // Write the rows before the patch watcher arms: they must be on disk for the
-    // next start, and an early write cannot trigger a reload of this boot.
+    // Write the fence row before the patch watcher arms (an early write cannot
+    // trigger a reload of this boot), then open the LAN listener.
     syncManagedRows(webCtx, resolved)
+    startProxy(webCtx, resolved)
+    webCtx.effect(() => () => stopProxy(), 'web-access: LAN proxy')
 
-    // Reconciling also checks whether the running listener still owes a restart,
-    // so it waits for boot to settle first. The effect stays synchronous and
-    // returns a disposer; the await lives inside the closure it owns.
+    // Reconcile once more after boot settles: the port is final then, and a
+    // config change that restarted this fiber lands here too. The effect stays
+    // synchronous and returns a disposer; the await lives inside the closure.
     webCtx.effect(() => {
       let cancelled = false
       void (async () => {

@@ -1,10 +1,11 @@
 /**
- * The managed listener rows: written into the profile patch, idempotent, and
- * removed when the bind returns to loopback.
+ * LAN reach: the managed fence row and the built-in reverse proxy.
  *
- * This is the regression the editor path had: `configEditor` cannot address the
- * bundled `webserver` / `connection` rows on dsh 0.2.1, so the bind silently
- * stayed on loopback. The plugin now writes the rows itself.
+ * Regression context: writing `host: 0.0.0.0` into the `webserver` row makes
+ * dsh 0.2.1 refuse to start ("unspecified (wildcard) address"), and the desktop
+ * host's window URL is hardcoded to 127.0.0.1 — so the listener must never be
+ * re-bound. The plugin writes only the `connection.trustedHosts` row and serves
+ * the LAN through a proxy on the same port at a concrete address.
  *
  *   node test/managed-rows.mjs
  */
@@ -12,21 +13,29 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { apply } from '../lib/index.js'
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-web-access-'))
 const patchPath = path.join(dir, 'cordis.patch.yml')
-const userLayer = '# user layer\n- id: web-access\n  config:\n    bind: 0.0.0.0\n'
-fs.writeFileSync(patchPath, userLayer)
+fs.writeFileSync(patchPath, '# user layer\n- id: web-access\n  config:\n    bind: 0.0.0.0\n')
 
-/** One stub composition: webserver, fence, and (optionally) the patch path. */
+// A stand-in for the application's loopback listener.
+const upstream = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/plain', 'x-upstream': 'yes', 'x-seen-host': req.headers.host ?? '' })
+  res.end(`upstream:${req.url}`)
+})
+await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+const appPort = upstream.address().port
+
+/** One stub composition; the proxy listens on 127.0.0.2 at the app's port. */
 function buildCtx({ host = '127.0.0.1', withProfile = true } = {}) {
   const routes = new Map()
   const webServer = {
     host,
-    port: 19387,
+    port: appPort,
     register(route) {
       routes.set(route.path, route)
       return () => { routes.delete(route.path) }
@@ -42,15 +51,20 @@ function buildCtx({ host = '127.0.0.1', withProfile = true } = {}) {
     ['connection', connection],
   ])
   if (withProfile) services.set('profileContext', { name: 'web', dir, patchPath })
+  const disposers = []
   const ctx = {
-    logger: { warn() {}, error() {} },
+    logger: { warn() {}, info() {}, error() {} },
     get(name) { return services.get(name) },
     inject(_names, callback) { callback(this) },
-    effect(fn) { const dispose = fn(); return () => { if (typeof dispose === 'function') dispose() } },
+    effect(fn) {
+      const dispose = fn()
+      if (typeof dispose === 'function') disposers.push(dispose)
+      return () => { if (typeof dispose === 'function') dispose() }
+    },
     get webServer() { return services.get('webServer') },
     get connection() { return services.get('connection') },
   }
-  return { ctx, routes }
+  return { ctx, routes, disposers }
 }
 
 function makeRes() {
@@ -79,43 +93,83 @@ async function readStatus(routes) {
   return JSON.parse(res.payload).status
 }
 
-// 1. bind 0.0.0.0 writes the listener rows next to the user's own layer.
-const first = buildCtx()
-apply(first.ctx, { bind: '0.0.0.0', autoTrustLocalIps: false, trustedHosts: ['10.1.2.3'] })
-const written = fs.readFileSync(patchPath, 'utf8')
-assert.match(written, /dsh-web-access managed rows/u)
-assert.match(written, /- id: webserver/u)
-assert.match(written, /host: 0\.0\.0\.0/u)
-assert.match(written, /port: !!js ctx\.webStartup\.port \?\? 3080/u)
-assert.match(written, /- id: connection/u)
-assert.match(written, /- "10\.1\.2\.3"/u)
-assert.match(written, /- id: web-access/u, 'the user layer survives')
-assert.equal((written.match(/- id: webserver/gu) ?? []).length, 1, 'one webserver row')
+const config = {
+  bind: '0.0.0.0',
+  lanAddress: '127.0.0.2',
+  autoTrustLocalIps: false,
+  trustedHosts: ['10.1.2.3'],
+  totpEnabled: false,
+  totpGate: 'all',
+}
 
-// 2. a second reconcile rewrites nothing (no patch-watcher loop).
-const second = buildCtx({ host: '127.0.0.1' })
-apply(second.ctx, { bind: '0.0.0.0', autoTrustLocalIps: false, trustedHosts: ['10.1.2.3'] })
+// 1. The managed block names the fence row only — never the listener.
+const first = buildCtx()
+apply(first.ctx, config)
+const written = fs.readFileSync(patchPath, 'utf8')
+const managedBlock = written.slice(written.indexOf('# >>> dsh-web-access managed rows'), written.indexOf('# <<< dsh-web-access managed rows'))
+assert.match(written, /dsh-web-access managed rows/u)
+assert.match(managedBlock, /- id: connection/u)
+assert.equal(managedBlock.includes('- id: webserver'), false, 'the listener row must never be written')
+assert.equal(managedBlock.includes('0.0.0.0'), false, 'no wildcard reaches the patch')
+assert.match(written, /- id: web-access/u, 'the user layer survives')
+assert.match(managedBlock, /- "127\.0\.0\.2"/u)
+assert.match(managedBlock, /- "10\.1\.2\.3"/u)
+
+// 2. The proxy accepts LAN traffic and forwards it to the loopback listener.
+const forwarded = await new Promise((resolve, reject) => {
+  const req = http.request({
+    host: '127.0.0.2',
+    port: appPort,
+    path: '/hello',
+    headers: { host: `127.0.0.2:${appPort}` },
+  }, (res) => {
+    let body = ''
+    res.setEncoding('utf8')
+    res.on('data', (chunk) => { body += chunk })
+    res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }))
+  })
+  req.on('error', reject)
+  req.end()
+})
+assert.equal(forwarded.status, 200, `proxy answered ${forwarded.status}`)
+assert.equal(forwarded.body, 'upstream:/hello', `proxy body was ${forwarded.body}`)
+assert.equal(forwarded.headers['x-upstream'], 'yes', 'response headers pass through')
+assert.equal(forwarded.headers['x-seen-host'], `127.0.0.2:${appPort}`, 'the Host header reaches upstream unchanged')
+
+// 3. The panel sees the LAN endpoint and a clean managed write.
+await new Promise((resolve) => { setTimeout(resolve, 25) })
+const status = await readStatus(first.routes)
+assert.equal(status.lan.listening, true, 'the proxy reports as listening')
+assert.equal(status.lan.address, '127.0.0.2')
+assert.equal(status.lan.port, appPort)
+assert.equal(status.managed.error, null, `no managed-write error, got ${status.managed.error}`)
+assert.deepEqual(status.origins, [`http://127.0.0.2:${appPort}`], 'the LAN origin is the proxy endpoint')
+
+// 4. A second apply rewrites nothing (no patch-watcher loop).
+const second = buildCtx()
+apply(second.ctx, config)
 assert.equal(fs.readFileSync(patchPath, 'utf8'), written, 'an unchanged document is not rewritten')
 
-// 3. the panel can see that this process still owes the restart.
-await new Promise((resolve) => { setTimeout(resolve, 25) })
-const owed = await readStatus(second.routes)
-assert.equal(owed.restartRequired, true, 'the live loopback listener still owes the restart')
-assert.equal(owed.managed.path, patchPath, 'the payload names the managed document')
-assert.equal(owed.managed.error, null, `no managed-write error, got ${owed.managed.error}`)
-
-// 4. back to loopback removes the whole block and nothing else.
+// 5. Back to loopback closes the proxy and removes the block.
 const third = buildCtx()
-apply(third.ctx, { bind: '127.0.0.1', autoTrustLocalIps: true, trustedHosts: [] })
+apply(third.ctx, { ...config, bind: '127.0.0.1', trustedHosts: [] })
 const stripped = fs.readFileSync(patchPath, 'utf8')
 assert.equal(stripped.includes('dsh-web-access managed rows'), false, 'the block is gone')
 assert.match(stripped, /- id: web-access/u, 'the user layer is untouched')
+const refused = await new Promise((resolve) => {
+  const req = http.request({ host: '127.0.0.2', port: appPort, path: '/' }, () => resolve(false))
+  req.on('error', () => resolve(true))
+  req.end()
+})
+assert.equal(refused, true, 'the proxy stops listening when loopback is selected')
 
-// 5. an unlocatable patch path is reported instead of silently ignored.
+// 6. An unlocatable patch path is reported instead of silently ignored.
 const blind = buildCtx({ withProfile: false })
-apply(blind.ctx, { bind: '0.0.0.0', autoTrustLocalIps: false, trustedHosts: [] })
+apply(blind.ctx, { ...config, trustedHosts: [] })
 await new Promise((resolve) => { setTimeout(resolve, 25) })
 const blindStatus = await readStatus(blind.routes)
 assert.equal(typeof blindStatus.managed.error, 'string', 'a missing patch path is an error, not a no-op')
 
-console.log('all managed-row checks passed')
+for (const dispose of third.disposers) dispose()
+upstream.close()
+console.log('all LAN reach checks passed')

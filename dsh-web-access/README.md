@@ -8,9 +8,10 @@ It presumes nothing about the deployment: there is no built-in "intranet" or
 "internet" mode — you choose the bind address, the authorities the browser-trust
 fence accepts, and whether a one-time code is required at all.
 
-Verified against DSH desktop `0.2.0-rc.2`; on `0.2.1-rc.2` the listener rows are
-applied on the next start, and the panel says so (see
-[How it fits together](#how-it-fits-together)).
+Verified against DSH desktop `0.2.0-rc.2` and `0.2.1-rc.2`. On 0.2.1 the core
+rejects a wildcard bind at startup, so LAN access goes through the built-in
+reverse proxy instead of re-binding the listener (see
+[How it fits together](#how-it-fits-together)); toggling it needs no restart.
 
 ## What you get
 
@@ -26,8 +27,9 @@ settings-form machinery.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `bind` | `127.0.0.1` | The address the webserver listens on. The other legal value is `0.0.0.0` (every interface). Written into the profile's [managed rows](#how-it-fits-together); the listener picks it up when it starts. |
-| `autoTrustLocalIps` | `true` | While binding `0.0.0.0`, trust this machine's non-internal IPv4 addresses. Turn off to pin the fence to an explicit list. |
+| `bind` | `127.0.0.1` | `127.0.0.1` keeps everything local. `0.0.0.0` turns on the built-in **reverse proxy**: LAN traffic arrives on this machine's LAN address at the same port and is forwarded to the loopback listener. It is never written as a wildcard listener — dsh rejects that at startup. |
+| `lanAddress` | `''` | The concrete LAN IPv4 the proxy listens on. Empty picks automatically (192.168/10 before 172.16/12, because Hyper-V and WSL live in the latter). |
+| `autoTrustLocalIps` | `true` | While the proxy is on, trust every non-internal IPv4 address of this machine. Turn off to trust only `lanAddress` plus `trustedHosts`. |
 | `trustedHosts` | `[]` | Extra authorities the Host/Origin fence accepts: `host` (any port) or `host:port`. |
 | `totpEnabled` | `false` | Require a one-time code before the login entry hands back the launch token. |
 | `totpGate` | `all` | `all` = every caller; `remote` = non-loopback callers only. |
@@ -58,28 +60,38 @@ off. Treat such a URL as a password: it grants full access to this Harness.
 ## How it fits together
 
 ```
-你的插件配置  ──apply──▶  写入 profile 的“托管行”区块
-                              │  webserver: host / port(保留 !!js 表达式)
-                              │  connection: trustedHosts(本机 LAN IP + 白名单)
-                              ▼
-                    profile cordis.patch.yml 被 application 监听
-                              ▼
-                    下一次启动:WebServer[Service.init] → server.listen(host, port)
+另一台设备 ──▶ http://<lanAddress>:<port>   (插件内的反向代理,只绑这一个具体地址)
+                     │  转发 Host 原样保留
+                     ▼
+              http://127.0.0.1:<port>        (应用自己的监听器,从未改动)
 ```
 
-`bind` 和信任列表属于**别的行**(`webserver`、`connection`),而这两行来自
-`dsh-web-app` bundle 的 `insert:` 组。`configEditor.entries()` 只暴露 profile
-patch 自己声明的行,所以通过编辑器改写它们时,在 dsh `0.2.1` 上会**静默失败**:
-面板显示已保存,监听地址却仍停在回环。这就是本插件改为直接写托管行区块的原因——
-写的就是人手会写的那两行,应用自己的 patch watcher 会应用它。
+两条硬约束决定了这个设计:
 
-监听器只能在 `Service.init` 里重新 bind,所以保存后当前进程不会立刻换地址。面板的
-状态块会显示 **“重启后生效”**(`status.restartRequired`),重启 Harness 即按新地址
-监听。`status.managed` 记录这次写入的路径、是否改动、时间与错误,写不进去时不再静默。
+1. **`0.0.0.0` 会被核心直接拒绝。** `dsh-host-webserver` 在配置校验阶段就抛
+   `host "0.0.0.0" is an unspecified (wildcard) address`;`webserver` 是 required
+   插件,所以整个应用**启动失败**。任何写进 `webserver.host` 的通配地址都会让
+   Harness 起不来。
+2. **桌面端窗口的 URL 写死 `http://127.0.0.1:<port>`。** 把监听器改绑到局域网
+   地址,窗口就指向一个没人监听的 socket。
+
+所以插件不再动监听器,而是在**同一个端口的本机局域网地址**上起一个反向代理
+(`http` + `WebSocket` upgrade 原样隧道),把请求转发给 `127.0.0.1:<port>`。
+监听地址的切换因此**立即生效,不需要重启**。
+
+代理用的 authority 必须被 Host/Origin 栅栏接受,所以插件会向 profile patch 写入
+一小段托管行(仅 `connection.trustedHosts`,刻意不写 `webserver`):
+
+```
+另一台设备 ──▶ 代理 ──▶ 应用
+                │
+                └─ 栅栏检查 Host: <lanAddress>:<port>  → 必须在 trustedHosts 里
+```
 
 托管区块位于 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`,由
 `# >>> dsh-web-access managed rows >>>` 标记包围,请勿手改;把 `bind` 设回
-`127.0.0.1` 会删除整个区块。
+`127.0.0.1` 会删除整个区块。`status.managed` 记录这次写入的路径、是否改动、时间
+与错误,写不进去时不再静默。
 
 The fence is **not reimplemented**: every route this plugin serves calls
 `connection.requestRejection(req)` — the same Host/Origin + cookie check the
@@ -116,10 +128,10 @@ moment is not reachable at that rate.
   plugin's* entry, i.e. how you obtain the launch token; it does not replace the
   application's `/` exchange. Do not hand `/?token=...` URLs to other devices —
   give them `/dsh-access` instead (the panel prints that URL).
-- **`0.0.0.0` exposes the port to every device on the network**, including
+- **The LAN proxy exposes the port to every device on the network**, including
   devices you did not plan for. `trustedHosts` is what the fence actually
   enforces, so if you want exactly one device, turn off `autoTrustLocalIps` and
-  list that device's IP.
+  list that device's IP (the proxy address is always included).
 - **The shipped cookie omits `Secure`** (upstream: the server is loopback HTTP).
   Over a plaintext network the cookie travels unencrypted. That is inherent to
   the current transport, not something this plugin can change.
@@ -150,7 +162,8 @@ it, and it is only ever returned by `/dsh-access/setup` behind the full cookie.
   third-party image API, and the latter would leak the shared key off-machine.
   The panel offers the base32 key and the `otpauth://` URI as copyable text;
   every authenticator app can paste either.
-- **Not a reverse proxy.** TLS termination, IP allow-lists at the network layer,
+- **Not a TLS-terminating proxy.** The built-in proxy speaks plain HTTP on the
+  LAN and forwards bytes; TLS termination, IP allow-lists at the network layer,
   and per-device revocation are out of scope; this plugin operates inside the
   harness's own request trust.
 

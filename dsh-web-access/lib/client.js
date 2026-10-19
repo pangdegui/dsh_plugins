@@ -50,8 +50,13 @@ window.__ModuleLoader__.load({
       sectionAccess: '网络可达性',
       bind: '监听地址',
       bindLoopback: '127.0.0.1 — 仅本机',
-      bindAll: '0.0.0.0 — 所有网络接口',
-      bindHint: '切换到所有接口后,同一网络的其他设备即可访问本端口。',
+      bindAll: '0.0.0.0 — 局域网(内置反向代理)',
+      bindHint: '应用自身仍只监听 127.0.0.1;选中该项后,插件会在本机局域网地址的同一端口上开一个反向代理,把局域网请求转发进来。',
+      lanAddress: '局域网地址',
+      lanAddressHint: '留空自动选择(优先 192.168 网段);也可以固定填本机某个 IPv4。',
+      lanEndpoint: '局域网入口',
+      lanOff: '未启用',
+      lanError: '局域网代理未监听:{error}',
       autoTrust: '信任本机局域网 IP',
       autoTrustHint: '开放监听时,自动把本机的非回环 IPv4 地址加入受信主机。关掉后只信任下面列出的地址。',
       trustedHosts: '额外受信主机',
@@ -91,7 +96,6 @@ window.__ModuleLoader__.load({
       notEnabled: '当前未启用。',
       enabledOn: '已启用(范围:{gate})',
       safety: '把监听地址开到 0.0.0.0 会让本网段任何设备都能访问这个端口;建议配合受信主机白名单与动态验证码。',
-      restartRequired: '监听地址已写入配置,但当前进程仍在旧地址上监听:重启 Harness 后生效。',
       managedError: '托管配置行写入失败:{error}',
     }
 
@@ -102,8 +106,13 @@ window.__ModuleLoader__.load({
       sectionAccess: 'Reachability',
       bind: 'Listen address',
       bindLoopback: '127.0.0.1 — this machine only',
-      bindAll: '0.0.0.0 — every network interface',
-      bindHint: 'Switching to all interfaces lets other devices on the network reach this port.',
+      bindAll: '0.0.0.0 — LAN (built-in reverse proxy)',
+      bindHint: 'The application keeps listening on 127.0.0.1 only; this option makes the plugin accept LAN traffic on the same port at this machine\'s LAN address and forward it.',
+      lanAddress: 'LAN address',
+      lanAddressHint: 'Leave empty to pick automatically (192.168 addresses first), or pin one of this machine\'s IPv4 addresses.',
+      lanEndpoint: 'LAN entry',
+      lanOff: 'off',
+      lanError: 'The LAN proxy is not listening: {error}',
       autoTrust: "Trust this machine's LAN IPs",
       autoTrustHint: 'While listening on all interfaces, add this machine\'s non-loopback IPv4 addresses to the trusted hosts. Off trusts only the list below.',
       trustedHosts: 'Additional trusted hosts',
@@ -143,7 +152,6 @@ window.__ModuleLoader__.load({
       notEnabled: 'Currently off.',
       enabledOn: 'On (scope: {gate})',
       safety: 'Listening on 0.0.0.0 exposes this port to every device on this network; pair it with a trusted-host allowlist and a one-time code.',
-      restartRequired: 'The listen address is written to the profile, but this process still listens on the old one: restart the Harness to apply it.',
       managedError: 'The managed configuration rows could not be written: {error}',
     }
 
@@ -472,13 +480,28 @@ window.__ModuleLoader__.load({
                 h('option', { key: 'all', value: '0.0.0.0' }, t('bindAll')),
               ]),
             }),
-            h(Check, {
+            h('Check', {
               key: 'auto',
               id: 'web-access-auto',
               label: t('autoTrust'),
               hint: t('autoTrustHint'),
               checked: draft?.autoTrustLocalIps !== false,
               onChange: (value) => { patch({ autoTrustLocalIps: value }) },
+            }),
+            h(Field, {
+              key: 'lan',
+              id: 'web-access-lan',
+              label: t('lanAddress'),
+              hint: t('lanAddressHint'),
+              children: h('input', {
+                id: 'web-access-lan',
+                type: 'text',
+                value: typeof draft?.lanAddress === 'string' ? draft.lanAddress : '',
+                disabled: draft === null || bind === '127.0.0.1',
+                placeholder: '192.168.88.17',
+                style: { ...controlStyle, width: '100%' },
+                onChange: (event) => { patch({ lanAddress: event.currentTarget.value.trim() }) },
+              }),
             }),
             h(Field, {
               key: 'trust',
@@ -513,6 +536,10 @@ window.__ModuleLoader__.load({
               h('span', { key: 'v1' }, show(status?.host)),
               h('span', { key: 'k2', style: keyStyle }, t('livePort')),
               h('span', { key: 'v2' }, show(status?.port)),
+              h('span', { key: 'k6', style: keyStyle }, t('lanEndpoint')),
+              h('span', { key: 'v6' }, status?.lan?.listening
+                ? `http://${status.lan.address}:${status.lan.port}`
+                : t('lanOff')),
               h('span', { key: 'k3', style: keyStyle }, t('liveTrust')),
               h('span', { key: 'v3' }, show(status?.trustLive)),
               h('span', { key: 'k4', style: keyStyle }, t('origins')),
@@ -520,7 +547,7 @@ window.__ModuleLoader__.load({
               h('span', { key: 'k5', style: keyStyle }, t('loginUrl')),
               h('span', { key: 'v5' }, show(status?.loginUrl)),
             ]),
-            status?.restartRequired ? h('p', { key: 'restart', style: hintStyle }, t('restartRequired')) : null,
+            status?.lan?.error ? h('p', { key: 'lanerr', style: hintStyle }, t('lanError', { error: status.lan.error })) : null,
             status?.managed?.error ? h('p', { key: 'managed', style: hintStyle }, t('managedError', { error: status.managed.error })) : null,
             (status?.tokenUrls ?? []).length === 0 ? null : h('div', { key: 'tokens', style: { marginTop: 14 } }, [
               h('span', { key: 'l', style: keyStyle }, t('tokenUrls')),
