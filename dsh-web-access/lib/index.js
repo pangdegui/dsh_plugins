@@ -12,13 +12,15 @@
  *      truth for how far this profile is reachable.
  *
  *   2. Reconciliation. `bind` and the trust fence are properties of *other*
- *      entries (`webserver`, `connection`), not of this plugin, so `apply`
- *      rewrites them through `configEditor`, the Loader-owned path that
- *      persists the change into the profile patch and hot-reloads only the
- *      affected entry. A Cordis `restart` re-runs `Service.init`, so the
- *      webserver really rebinds — no application restart required. Each
- *      target is written at most once per process, which makes a reconcile
- *      idempotent instead of a restart loop.
+ *      entries (`webserver`, `connection`), not of this plugin. Those rows come
+ *      from a bundle's `insert:` group, which `configEditor` cannot address on
+ *      every dsh build (`entries()` only returns rows the profile patch owns),
+ *      so editor-based edits vanished silently. This plugin therefore writes a
+ *      **managed block** into the profile patch — the same rows a person would
+ *      write by hand — and the application's patch watcher applies that layer.
+ *      A listener can only be re-bound by `Service.init`, so the panel reports
+ *      `restartRequired` instead of pretending the change already took effect;
+ *      the next start binds the configured address.
  *
  *   3. The TOTP gate. A script-free login entry (`/dsh-access`) verifies a
  *      time-based one-time password and then hands back the process launch
@@ -137,36 +139,23 @@ function loadSecret({ create = false } = {}) {
 // --- reconciliation ----------------------------------------------------------
 
 /**
- * Bounded write attempts per target.
+ * The managed block: listener rows this plugin owns inside the profile patch.
  *
- * The primary decision is always "does the live value already match?", so a
- * settled profile writes nothing. This counter only stops a restart loop when a
- * write genuinely fails to take effect; it resets whenever the live value does
- * match, so a user may toggle a setting back and forth freely.
+ * `configEditor` can only address entries the profile patch itself declares,
+ * and `webserver` / `connection` come from a bundle's `insert:` group. Rewriting
+ * them through the editor therefore failed silently on dsh 0.2.1, which left
+ * the server on loopback no matter what `bind` said. Writing the rows where a
+ * person would write them is the version-independent path: the application
+ * watches this file and applies the layer, and the rows are read when the
+ * listener starts.
  */
-const editAttempts = new Map()
-const MAX_EDIT_ATTEMPTS = 3
+const MANAGED_START = '# >>> dsh-web-access managed rows (do not edit) >>>'
+const MANAGED_END = '# <<< dsh-web-access managed rows <<<'
 
-async function editEntry(ctx, editor, entryId, key, nextValue) {
-  const editorService = editor ?? ctx.get('configEditor')
-  if (editorService === undefined) return false
-  const entry = editorService.entries().find((candidate) => candidate.options.id === entryId)
-  if (entry === undefined) return false
-  const signature = `${entryId}:${key}`
-  const used = editAttempts.get(signature) ?? 0
-  if (used >= MAX_EDIT_ATTEMPTS) {
-    ctx.logger?.warn?.('web-access: %s did not take effect after %s writes; leaving it alone', signature, used)
-    return false
-  }
-  editAttempts.set(signature, used + 1)
-  try {
-    await editorService.edit(entry, (_current, inherited) => ({ ...inherited, [key]: nextValue }))
-    return true
-  } catch (error) {
-    ctx.logger.warn('web-access: could not persist %s.%s: %s', entryId, key, error instanceof Error ? error.message : String(error))
-    return false
-  }
-}
+/** Last managed-block write, surfaced by the panel. */
+let lastManaged = { path: null, changed: false, at: 0, error: null }
+/** Whether the running listener still owes a restart to honor `bind`. */
+let restartRequired = false
 
 /** This machine's non-internal IPv4 addresses, the same set upstream derives. */
 function localIpv4Addresses() {
@@ -176,20 +165,107 @@ function localIpv4Addresses() {
     .map((iface) => iface.address)
 }
 
-/** Bring the fence in line with the chosen reach, then the bind itself. */
+/** Authorities the trust fence must accept for the configured reach. */
+function trustedAuthorities(config) {
+  const merged = [
+    ...(config.autoTrustLocalIps && config.bind === '0.0.0.0' ? localIpv4Addresses() : []),
+    ...config.trustedHosts,
+  ]
+  return [...new Set(merged.map((entry) => (typeof entry === 'string' ? entry.trim() : '')).filter((entry) => entry !== ''))]
+}
+
+/**
+ * The YAML rows that make the listener and the fence follow this plugin.
+ * @returns the row document, or '' when loopback needs no rows at all.
+ */
+function managedRows(config) {
+  if (config.bind !== '0.0.0.0') return ''
+  const authorities = trustedAuthorities(config)
+  const lines = [
+    '# Pinned here because the Loader cannot re-bind a bundled row through',
+    '# configEditor: these rows take effect when the listener starts.',
+    '- id: webserver',
+    '  config:',
+    '    host: 0.0.0.0',
+    '    port: !!js ctx.webStartup.port ?? 3080',
+  ]
+  if (authorities.length > 0) {
+    lines.push('- id: connection', '  config:', '    trustedHosts:')
+    for (const authority of authorities) lines.push(`      - ${JSON.stringify(authority)}`)
+  }
+  return lines.join('\n')
+}
+
+/** Locate the profile patch the Loader watches. */
+function patchPath(ctx) {
+  const fromProfile = ctx.get('profileContext')?.patchPath
+  if (typeof fromProfile === 'string' && fromProfile !== '') return fromProfile
+  const fromEditor = ctx.get('configEditor')?.documentPath
+  return typeof fromEditor === 'string' && fromEditor !== '' ? fromEditor : null
+}
+
+/**
+ * Write (or remove) the managed block and report what happened.
+ *
+ * Idempotent by construction: an unchanged document is never rewritten, so the
+ * patch watcher settles after at most one reload instead of oscillating.
+ */
+function syncManagedRows(ctx, config) {
+  const file = patchPath(ctx)
+  const at = Date.now()
+  if (file === null) {
+    lastManaged = { path: null, changed: false, at, error: 'the profile patch path is unavailable' }
+    return lastManaged
+  }
+  let before
+  try {
+    before = fs.readFileSync(file, 'utf8')
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      lastManaged = { path: file, changed: false, at, error: String(error.message ?? error) }
+      return lastManaged
+    }
+    before = ''
+  }
+  const body = managedRows(config)
+  const block = body === '' ? '' : `${MANAGED_START}\n${body}\n${MANAGED_END}\n`
+  const start = before.indexOf(MANAGED_START)
+  const end = before.indexOf(MANAGED_END)
+  let after = before
+  if (start !== -1 && end > start) {
+    after = `${before.slice(0, start)}${block}${before.slice(end + MANAGED_END.length).replace(/^\r?\n/u, '')}`
+  } else if (block !== '') {
+    after = `${before.trimEnd()}\n\n${block}`
+  }
+  if (after === before) {
+    lastManaged = { path: file, changed: false, at, error: null }
+    return lastManaged
+  }
+  try {
+    const temp = `${file}.web-access.tmp`
+    fs.writeFileSync(temp, after, { mode: 0o600 })
+    fs.renameSync(temp, file)
+    lastManaged = { path: file, changed: true, at, error: null }
+  } catch (error) {
+    lastManaged = { path: file, changed: false, at, error: String(error.message ?? error) }
+  }
+  return lastManaged
+}
+
+/** Apply the configured reach and record whether a restart is still owed. */
 async function reconcile(ctx, config) {
-  const editor = ctx.get('configEditor')
-  if (editor === undefined) return
-
-  const wantedTrust = config.autoTrustLocalIps && config.bind === '0.0.0.0' ? localIpv4Addresses() : []
-  const merged = [...new Set([...wantedTrust, ...config.trustedHosts])].filter((entry) => typeof entry === 'string' && entry.trim() !== '')
-  const liveTrust = ctx.get('connection')?.trustedHosts
-  const sameTrust = Array.isArray(liveTrust) && liveTrust.length === merged.length && liveTrust.every((value, index) => value === merged[index])
-  if (!sameTrust) await editEntry(ctx, editor, 'connection', 'trustedHosts', merged)
-
+  syncManagedRows(ctx, config)
   const liveHost = ctx.get('webServer')?.host
-  if (typeof liveHost === 'string' && liveHost !== config.bind) {
-    await editEntry(ctx, editor, 'webserver', 'host', config.bind)
+  restartRequired = typeof liveHost === 'string' && liveHost !== config.bind
+  if (restartRequired) {
+    ctx.logger?.warn?.(
+      'web-access: listener is on %s, configured %s; the managed rows apply on the next start',
+      liveHost,
+      config.bind,
+    )
+  }
+  if (lastManaged.error !== null) {
+    ctx.logger?.warn?.('web-access: managed rows were not written: %s', lastManaged.error)
   }
 }
 
@@ -421,6 +497,15 @@ function configPayload(ctx, config) {
       })(),
       lastSaveError,
       lastSaveAt,
+      /** True when the running listener still needs a restart to honor `bind`. */
+      restartRequired,
+      /** What the managed block write did on this process. */
+      managed: {
+        path: lastManaged.path,
+        changed: lastManaged.changed,
+        at: lastManaged.at,
+        error: lastManaged.error,
+      },
     },
   }
 }
@@ -665,12 +750,16 @@ export function apply(ctx, config) {
 
   // The fence and the bind belong to other entries; adopt them once the
   // services they live on exist, so a late or absent one never blocks load.
-  ctx.inject(['webServer'], (webCtx) => {
+  // `profileContext` carries the patch path the managed rows live in.
+  ctx.inject(['webServer', 'profileContext'], (webCtx) => {
     registerRoutes(webCtx, resolved)
+    // Write the rows before the patch watcher arms: they must be on disk for the
+    // next start, and an early write cannot trigger a reload of this boot.
+    syncManagedRows(webCtx, resolved)
 
-    // Reconciling writes configuration back through the Loader, so it waits for
-    // boot to settle first. The effect stays synchronous and returns a
-    // disposer; the await lives inside the closure it owns.
+    // Reconciling also checks whether the running listener still owes a restart,
+    // so it waits for boot to settle first. The effect stays synchronous and
+    // returns a disposer; the await lives inside the closure it owns.
     webCtx.effect(() => {
       let cancelled = false
       void (async () => {

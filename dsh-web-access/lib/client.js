@@ -91,6 +91,8 @@ window.__ModuleLoader__.load({
       notEnabled: '当前未启用。',
       enabledOn: '已启用(范围:{gate})',
       safety: '把监听地址开到 0.0.0.0 会让本网段任何设备都能访问这个端口;建议配合受信主机白名单与动态验证码。',
+      restartRequired: '监听地址已写入配置,但当前进程仍在旧地址上监听:重启 Harness 后生效。',
+      managedError: '托管配置行写入失败:{error}',
     }
 
     const en = {
@@ -141,6 +143,8 @@ window.__ModuleLoader__.load({
       notEnabled: 'Currently off.',
       enabledOn: 'On (scope: {gate})',
       safety: 'Listening on 0.0.0.0 exposes this port to every device on this network; pair it with a trusted-host allowlist and a one-time code.',
+      restartRequired: 'The listen address is written to the profile, but this process still listens on the old one: restart the Harness to apply it.',
+      managedError: 'The managed configuration rows could not be written: {error}',
     }
 
     const browserLanguage = () => {
@@ -516,6 +520,8 @@ window.__ModuleLoader__.load({
               h('span', { key: 'k5', style: keyStyle }, t('loginUrl')),
               h('span', { key: 'v5' }, show(status?.loginUrl)),
             ]),
+            status?.restartRequired ? h('p', { key: 'restart', style: hintStyle }, t('restartRequired')) : null,
+            status?.managed?.error ? h('p', { key: 'managed', style: hintStyle }, t('managedError', { error: status.managed.error })) : null,
             (status?.tokenUrls ?? []).length === 0 ? null : h('div', { key: 'tokens', style: { marginTop: 14 } }, [
               h('span', { key: 'l', style: keyStyle }, t('tokenUrls')),
               h('p', { key: 'h', style: hintStyle }, t('tokenUrlsHint')),

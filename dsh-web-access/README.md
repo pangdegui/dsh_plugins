@@ -8,7 +8,9 @@ It presumes nothing about the deployment: there is no built-in "intranet" or
 "internet" mode — you choose the bind address, the authorities the browser-trust
 fence accepts, and whether a one-time code is required at all.
 
-Verified against DSH desktop `0.2.0-rc.2`.
+Verified against DSH desktop `0.2.0-rc.2`; on `0.2.1-rc.2` the listener rows are
+applied on the next start, and the panel says so (see
+[How it fits together](#how-it-fits-together)).
 
 ## What you get
 
@@ -24,7 +26,7 @@ settings-form machinery.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `bind` | `127.0.0.1` | The address the webserver listens on. The other legal value is `0.0.0.0` (every interface). Applied live — no restart. |
+| `bind` | `127.0.0.1` | The address the webserver listens on. The other legal value is `0.0.0.0` (every interface). Written into the profile's [managed rows](#how-it-fits-together); the listener picks it up when it starts. |
 | `autoTrustLocalIps` | `true` | While binding `0.0.0.0`, trust this machine's non-internal IPv4 addresses. Turn off to pin the fence to an explicit list. |
 | `trustedHosts` | `[]` | Extra authorities the Host/Origin fence accepts: `host` (any port) or `host:port`. |
 | `totpEnabled` | `false` | Require a one-time code before the login entry hands back the launch token. |
@@ -56,22 +58,28 @@ off. Treat such a URL as a password: it grants full access to this Harness.
 ## How it fits together
 
 ```
-你的插件配置  ──apply──▶  configEditor.edit(entry, …)
-                              │  持久化到 profile cordis.patch.yml
-                              │  reconcileProfilePatches → 只重载该 entry
+你的插件配置  ──apply──▶  写入 profile 的“托管行”区块
+                              │  webserver: host / port(保留 !!js 表达式)
+                              │  connection: trustedHosts(本机 LAN IP + 白名单)
                               ▼
-                    cordis fiber.update() → restart()
+                    profile cordis.patch.yml 被 application 监听
                               ▼
-                    WebServer[Service.init] → server.listen(host, port)   ← 真的重新绑定
+                    下一次启动:WebServer[Service.init] → server.listen(host, port)
 ```
 
-So `bind` is not a separate "web access" switch bolted onto the app: the plugin
-rewrites the *existing* `webserver` entry's configuration through the
-Loader-owned path, and Cordis's restart semantics make `Service.init` run again,
-which rebinds the socket. Nothing else in the app is bypassed.
+`bind` 和信任列表属于**别的行**(`webserver`、`connection`),而这两行来自
+`dsh-web-app` bundle 的 `insert:` 组。`configEditor.entries()` 只暴露 profile
+patch 自己声明的行,所以通过编辑器改写它们时,在 dsh `0.2.1` 上会**静默失败**:
+面板显示已保存,监听地址却仍停在回环。这就是本插件改为直接写托管行区块的原因——
+写的就是人手会写的那两行,应用自己的 patch watcher 会应用它。
 
-Each target is written at most once per process (see `written`), so a reconcile
-can settle instead of becoming a restart loop.
+监听器只能在 `Service.init` 里重新 bind,所以保存后当前进程不会立刻换地址。面板的
+状态块会显示 **“重启后生效”**(`status.restartRequired`),重启 Harness 即按新地址
+监听。`status.managed` 记录这次写入的路径、是否改动、时间与错误,写不进去时不再静默。
+
+托管区块位于 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`,由
+`# >>> dsh-web-access managed rows >>>` 标记包围,请勿手改;把 `bind` 设回
+`127.0.0.1` 会删除整个区块。
 
 The fence is **not reimplemented**: every route this plugin serves calls
 `connection.requestRejection(req)` — the same Host/Origin + cookie check the
