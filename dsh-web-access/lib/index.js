@@ -46,6 +46,7 @@ import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { base32Encode, base32Decode, otpauthUri, verifyTotp } from './totp.js'
+import { renderSVG } from './uqr.js'
 
 export const name = 'web-access'
 
@@ -386,6 +387,15 @@ async function reconcile(ctx, config) {
   if (lastManaged.error !== null) {
     ctx.logger?.warn?.('web-access: managed rows were not written: %s', lastManaged.error)
   }
+  // Enabling the gate with no key provisioned would show "尚未生成密钥" forever,
+  // so mint it here: the panel can then render the QR immediately.
+  if (config.totpEnabled === true) {
+    try {
+      loadSecret({ create: true })
+    } catch (error) {
+      ctx.logger?.warn?.('web-access: the TOTP key could not be created: %s', error instanceof Error ? error.message : String(error))
+    }
+  }
 }
 
 // --- the trust fence ---------------------------------------------------------
@@ -552,15 +562,28 @@ function reachableOrigins(ctx, config) {
   return [`http://${host}:${String(port)}`]
 }
 
+/** QR for the otpauth URI, as a data URI the panel can put in an <img>. */
+function qrDataUri(text) {
+  try {
+    const svg = renderSVG(text, { ecc: 'M', border: 2, pixelSize: 4 })
+    return `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
 function setupPayload(ctx, config, secret) {
   const origins = reachableOrigins(ctx, config)
+  const otpauth = otpauthUri(secret, os.hostname())
   return {
     enabled: config.totpEnabled === true,
     gate: config.totpGate,
     bind: config.bind,
     port: ctx.get('webServer')?.port ?? null,
     secret: base32Encode(secret),
-    otpauth: otpauthUri(secret, os.hostname()),
+    otpauth,
+    /** A scannable binding: the panel shows this instead of copying the key. */
+    qr: qrDataUri(otpauth),
     trust: {
       localIps: config.bind !== '127.0.0.1' && config.autoTrustLocalIps ? localIpv4Addresses() : [],
       extra: config.trustedHosts,
@@ -620,6 +643,10 @@ function configPayload(ctx, config) {
        * can read them (this route is behind the session cookie).
        */
       tokenUrls: (() => {
+        // A token URL is the application's own credential and bypasses this
+        // gate entirely, so it is not offered while TOTP is on: handing it out
+        // would make the one-time code decorative.
+        if (config.totpEnabled === true) return []
         const connection = ctx.get('connection')
         if (connection === undefined || typeof connection.authenticatedUrl !== 'function') return []
         return origins.map((origin) => connection.authenticatedUrl(`${origin}/`))

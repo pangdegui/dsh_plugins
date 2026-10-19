@@ -158,10 +158,14 @@ it, and it is only ever returned by `/dsh-access/setup` behind the full cookie.
   from; changing it in place would desynchronise the page from the server. The
   panel shows the live port read-only instead, and every trusted-host entry is
   port-agnostic unless you write `host:port` explicitly.
-- **No QR code.** Rendering one would mean shipping a QR encoder or calling a
-  third-party image API, and the latter would leak the shared key off-machine.
-  The panel offers the base32 key and the `otpauth://` URI as copyable text;
-  every authenticator app can paste either.
+- **QR encoding is vendored.** `lib/uqr.js` is uqr 0.1.3 (MIT, see
+  `lib/uqr.LICENSE`), so the QR is rendered inside the authenticated panel and
+  the shared key never leaves the machine. The base32 key and the `otpauth://`
+  URI stay copyable for authenticators without a camera.
+- **Token URLs are hidden while the gate is on.** A `?token=…` URL is the
+  application's own credential and bypasses `/dsh-access` entirely; offering it
+  next to a one-time-code gate would make the gate decorative. Enable TOTP and
+  hand other devices the `/dsh-access` URL (or its QR) instead.
 - **Not a TLS-terminating proxy.** The built-in proxy speaks plain HTTP on the
   LAN and forwards bytes; TLS termination, IP allow-lists at the network layer,
   and per-device revocation are out of scope; this plugin operates inside the

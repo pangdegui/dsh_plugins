@@ -40,6 +40,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'web-access'
     const CONFIG_PATH = '/dsh-access/config'
     const SETUP_PATH = '/dsh-access/setup'
+    const LOGIN_URL_FALLBACK = '/dsh-access'
 
     // --- copy ------------------------------------------------------------------
 
@@ -86,7 +87,9 @@ window.__ModuleLoader__.load({
       gateRemote: '仅非本机来源',
       gateHint: '本机来源按 Host 是否为回环地址判断。',
       secret: '共享密钥',
-      secretHint: '把密钥或 otpauth 链接录入验证器应用。密钥只保存在本机文件里,不在配置中。',
+      secretHint: '用验证器应用扫描下面的二维码;也可以手动输入密钥或 otpauth 链接。密钥只保存在本机文件里,不在配置中。',
+      qrHint: '二维码只在已登录的面板里显示,不会经过任何第三方服务。',
+      gatedHint: '已开启动态验证码:其他设备请打开 {url} 并输入 6 位动态码。带令牌的连接地址会绕过验证码,所以已隐藏。',
       showSecret: '显示密钥',
       rotate: '重新生成',
       rotateHint: '重新生成会让已录入的验证器立即失效。',
@@ -142,7 +145,9 @@ window.__ModuleLoader__.load({
       gateRemote: 'Non-loopback callers only',
       gateHint: 'A caller counts as local when its Host is a loopback address.',
       secret: 'Shared key',
-      secretHint: 'Add the key or the otpauth link to your authenticator. The key lives in a local file, never in configuration.',
+      secretHint: 'Scan the QR below with your authenticator, or enter the key or otpauth link by hand. The key lives in a local file, never in configuration.',
+      qrHint: 'The QR is rendered inside this authenticated panel and never sent to a third-party service.',
+      gatedHint: 'One-time codes are on: other devices should open {url} and enter the 6-digit code. Token-carrying URLs bypass the gate, so they are hidden.',
       showSecret: 'Show key',
       rotate: 'Regenerate',
       rotateHint: 'Regenerating invalidates every authenticator already enrolled.',
@@ -548,6 +553,9 @@ window.__ModuleLoader__.load({
               h('span', { key: 'v5' }, show(status?.loginUrl)),
             ]),
             status?.lan?.error ? h('p', { key: 'lanerr', style: hintStyle }, t('lanError', { error: status.lan.error })) : null,
+            draft?.totpEnabled
+              ? h('p', { key: 'gated', style: hintStyle }, t('gatedHint', { url: status?.loginUrl ?? LOGIN_URL_FALLBACK }))
+              : null,
             status?.managed?.error ? h('p', { key: 'managed', style: hintStyle }, t('managedError', { error: status.managed.error })) : null,
             (status?.tokenUrls ?? []).length === 0 ? null : h('div', { key: 'tokens', style: { marginTop: 14 } }, [
               h('span', { key: 'l', style: keyStyle }, t('tokenUrls')),
@@ -607,6 +615,17 @@ window.__ModuleLoader__.load({
             ]),
             secret === null ? null : h('div', { key: 'secretBody', style: { marginTop: 12 } }, [
               h('p', { key: 'sh', style: hintStyle }, t('secretHint')),
+              secret.qr
+                ? h('img', {
+                  key: 'qr',
+                  src: secret.qr,
+                  alt: 'TOTP QR',
+                  width: 176,
+                  height: 176,
+                  style: { display: 'block', marginTop: 10, background: '#fff', padding: 8, borderRadius: 8 },
+                })
+                : null,
+              secret.qr ? h('p', { key: 'qh', style: hintStyle }, t('qrHint')) : null,
               h('span', { key: 'sl', style: keyStyle }, t('secret')),
               h('code', { key: 'sv', style: monoStyle }, secret.secret ?? ''),
               h('div', { key: 'sc', style: { marginTop: 6 } }, h(CopyButton, { text: secret.secret ?? '', t })),
