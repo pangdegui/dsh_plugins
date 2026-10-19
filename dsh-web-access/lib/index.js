@@ -71,6 +71,8 @@ export const Config = z.object({
   bind: z.union([z.const('127.0.0.1'), z.const('0.0.0.0')]).default('127.0.0.1'),
   /** LAN address the proxy listens on; empty picks the primary private IPv4. */
   lanAddress: z.string().default(''),
+  /** Fixed LAN port the proxy listens on; 3080 is the harness default. */
+  lanPort: z.natural().min(1).max(65535).default(3080),
   /** Trust this machine's own non-internal IPv4 addresses as hosts. */
   autoTrustLocalIps: z.boolean().default(true),
   /** Extra authorities the browser-trust fence accepts (`host`, `host:port`). */
@@ -84,6 +86,8 @@ export const Config = z.object({
 const LOGIN_PATH = '/dsh-access'
 const SETUP_PATH = '/dsh-access/setup'
 const CONFIG_PATH = '/dsh-access/config'
+/** The LAN-facing port default; the harness's own documented web port. */
+const DEFAULT_LAN_PORT = 3080
 /** This plugin's own Loader row id, the entry `configEditor` edits. */
 const ENTRY_ID = name
 
@@ -162,7 +166,7 @@ const MANAGED_END = '# <<< dsh-web-access managed rows <<<'
 let lastManaged = { path: null, changed: false, at: 0, error: null }
 
 /** The LAN-facing proxy: bound to one concrete LAN address, never to 0.0.0.0. */
-const proxyState = { server: null, host: null, port: null, listening: false, error: null }
+const proxyState = { server: null, host: null, port: null, upstream: null, listening: false, error: null }
 
 /** This machine's non-internal IPv4 addresses, the same set upstream derives. */
 function localIpv4Addresses() {
@@ -328,18 +332,22 @@ function startProxy(ctx, config) {
     stopProxy()
     return
   }
-  const port = ctx.get('webServer')?.port
+  // The application's own loopback port stays launch-assigned (the desktop
+  // window follows it); only the LAN-facing port is fixed and configurable, so
+  // a machine-local URL never changes between restarts.
+  const upstreamPort = ctx.get('webServer')?.port
+  const listenPort = Number.isInteger(config.lanPort) && config.lanPort > 0 ? config.lanPort : DEFAULT_LAN_PORT
   const host = pickLanAddress(config)
-  if (typeof port !== 'number' || host === null) {
-    proxyState.error = typeof port !== 'number'
+  if (typeof upstreamPort !== 'number' || host === null) {
+    proxyState.error = typeof upstreamPort !== 'number'
       ? 'the local listener has no port yet'
       : 'this machine has no LAN IPv4 address'
     return
   }
-  if (proxyState.server !== null && proxyState.host === host && proxyState.port === port) return
+  if (proxyState.server !== null && proxyState.host === host && proxyState.port === listenPort && proxyState.upstream === upstreamPort) return
   stopProxy()
-  const server = http.createServer((req, res) => forwardHttp(req, res, port))
-  server.on('upgrade', (req, socket, head) => forwardUpgrade(req, socket, head, port))
+  const server = http.createServer((req, res) => forwardHttp(req, res, upstreamPort))
+  server.on('upgrade', (req, socket, head) => forwardUpgrade(req, socket, head, upstreamPort))
   server.on('clientError', (_error, socket) => {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
   })
@@ -347,21 +355,23 @@ function startProxy(ctx, config) {
     proxyState.server = null
     proxyState.host = null
     proxyState.port = null
+    proxyState.upstream = null
     proxyState.listening = false
     proxyState.error = String(error.message ?? error)
-    ctx.logger?.warn?.('web-access: LAN proxy could not listen on %s:%s: %s', host, port, proxyState.error)
+    ctx.logger?.warn?.('web-access: LAN proxy could not listen on %s:%s: %s', host, listenPort, proxyState.error)
   })
   server.once('listening', () => {
     proxyState.listening = true
     proxyState.error = null
-    ctx.logger?.info?.('web-access: LAN proxy listening on http://%s:%s', host, port)
+    ctx.logger?.info?.('web-access: LAN proxy listening on http://%s:%s', host, listenPort)
   })
   proxyState.server = server
   proxyState.host = host
-  proxyState.port = port
+  proxyState.port = listenPort
+  proxyState.upstream = upstreamPort
   proxyState.listening = false
   proxyState.error = null
-  server.listen(port, host)
+  server.listen(listenPort, host)
 }
 
 /** Close the LAN listener, if one is open. */
@@ -370,6 +380,7 @@ function stopProxy() {
   proxyState.server = null
   proxyState.host = null
   proxyState.port = null
+  proxyState.upstream = null
   proxyState.listening = false
   if (server === null) return
   try {
@@ -552,12 +563,13 @@ function noticePage(title, body) {
 
 /** Addresses another device can actually use to reach this server. */
 function reachableOrigins(ctx, config) {
-  const port = ctx.get('webServer')?.port
-  if (typeof port !== 'number') return []
   if (config.bind !== '127.0.0.1') {
     const host = proxyState.host ?? pickLanAddress(config)
+    const port = Number.isInteger(config.lanPort) && config.lanPort > 0 ? config.lanPort : DEFAULT_LAN_PORT
     return host === null ? [] : [`http://${host}:${String(port)}`]
   }
+  const port = ctx.get('webServer')?.port
+  if (typeof port !== 'number') return []
   const host = typeof ctx.get('webServer')?.host === 'string' ? ctx.get('webServer').host : '127.0.0.1'
   return [`http://${host}:${String(port)}`]
 }
@@ -614,6 +626,7 @@ function configPayload(ctx, config) {
     config: {
       bind: config.bind,
       lanAddress: config.lanAddress,
+      lanPort: config.lanPort,
       autoTrustLocalIps: config.autoTrustLocalIps,
       trustedHosts: config.trustedHosts,
       totpEnabled: config.totpEnabled,
@@ -691,6 +704,13 @@ function validatePatch(body) {
       throw new HttpError(400, `lanAddress must be an IPv4 address or empty (received ${JSON.stringify(body.lanAddress)})`)
     }
     patch.lanAddress = value
+  }
+  if (body.lanPort !== undefined) {
+    const value = typeof body.lanPort === 'string' ? Number(body.lanPort) : body.lanPort
+    if (!Number.isInteger(value) || value < 1 || value > 65535) {
+      throw new HttpError(400, `lanPort must be an integer between 1 and 65535 (received ${JSON.stringify(body.lanPort)})`)
+    }
+    patch.lanPort = value
   }
   if (body.trustedHosts !== undefined) {
     if (!Array.isArray(body.trustedHosts)) throw new HttpError(400, 'trustedHosts must be an array')
@@ -902,6 +922,7 @@ export function apply(ctx, config) {
   const resolved = {
     bind: settings.bind === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1',
     lanAddress: typeof settings.lanAddress === 'string' ? settings.lanAddress.trim() : '',
+    lanPort: Number.isInteger(settings.lanPort) && settings.lanPort > 0 ? settings.lanPort : DEFAULT_LAN_PORT,
     autoTrustLocalIps: settings.autoTrustLocalIps !== false,
     trustedHosts: Array.isArray(settings.trustedHosts)
       ? settings.trustedHosts.filter((entry) => typeof entry === 'string' && entry.trim() !== '')

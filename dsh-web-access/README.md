@@ -27,8 +27,9 @@ settings-form machinery.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `bind` | `127.0.0.1` | `127.0.0.1` keeps everything local. `0.0.0.0` turns on the built-in **reverse proxy**: LAN traffic arrives on this machine's LAN address at the same port and is forwarded to the loopback listener. It is never written as a wildcard listener — dsh rejects that at startup. |
+| `bind` | `127.0.0.1` | `127.0.0.1` keeps everything local. `0.0.0.0` turns on the built-in **reverse proxy**: LAN traffic arrives on this machine's LAN address and is forwarded to the loopback listener. It is never written as a wildcard listener — dsh rejects that at startup. |
 | `lanAddress` | `''` | The concrete LAN IPv4 the proxy listens on. Empty picks automatically (192.168/10 before 172.16/12, because Hyper-V and WSL live in the latter). |
+| `lanPort` | `3080` | The fixed LAN port. Stable across restarts and applied live, so a URL you hand to another device keeps working. The application's own loopback port stays launch-assigned and is never exposed. |
 | `autoTrustLocalIps` | `true` | While the proxy is on, trust every non-internal IPv4 address of this machine. Turn off to trust only `lanAddress` plus `trustedHosts`. |
 | `trustedHosts` | `[]` | Extra authorities the Host/Origin fence accepts: `host` (any port) or `host:port`. |
 | `totpEnabled` | `false` | Require a one-time code before the login entry hands back the launch token. |
@@ -60,10 +61,10 @@ off. Treat such a URL as a password: it grants full access to this Harness.
 ## How it fits together
 
 ```
-另一台设备 ──▶ http://<lanAddress>:<port>   (插件内的反向代理,只绑这一个具体地址)
+另一台设备 ──▶ http://<lanAddress>:<lanPort>   (插件内的反向代理,固定端口,默认 3080)
                      │  转发 Host 原样保留
                      ▼
-              http://127.0.0.1:<port>        (应用自己的监听器,从未改动)
+              http://127.0.0.1:<appPort>        (应用自己的监听器,启动时分配,从未改动)
 ```
 
 两条硬约束决定了这个设计:
@@ -153,11 +154,11 @@ it, and it is only ever returned by `/dsh-access/setup` behind the full cookie.
 
 ## Deliberate limits
 
-- **`port` is not configurable here.** The listening port belongs to the launch,
-  not to this plugin, and an already-open page is bound to the port it loaded
-  from; changing it in place would desynchronise the page from the server. The
-  panel shows the live port read-only instead, and every trusted-host entry is
-  port-agnostic unless you write `host:port` explicitly.
+- **The application's own loopback port is not configurable.** The desktop host
+  binds a launch-assigned port and opens its window at that exact address, so
+  pinning it would desynchronise the window and a busy port would be a fatal
+  startup error. Only the LAN-facing `lanPort` is fixed (3080 by default), which
+  is the number other devices actually see.
 - **QR encoding is vendored.** `lib/uqr.js` is uqr 0.1.3 (MIT, see
   `lib/uqr.LICENSE`), so the QR is rendered inside the authenticated panel and
   the shared key never leaves the machine. The base32 key and the `otpauth://`

@@ -55,6 +55,8 @@ window.__ModuleLoader__.load({
       bindHint: '应用自身仍只监听 127.0.0.1;选中该项后,插件会在本机局域网地址的同一端口上开一个反向代理,把局域网请求转发进来。',
       lanAddress: '局域网地址',
       lanAddressHint: '留空自动选择(优先 192.168 网段);也可以固定填本机某个 IPv4。',
+      lanPort: '局域网端口',
+      lanPortHint: '固定端口,默认 3080,保存后立即生效。应用自身的回环端口仍由启动决定,窗口不受影响。',
       lanEndpoint: '局域网入口',
       lanOff: '未启用',
       lanError: '局域网代理未监听:{error}',
@@ -113,6 +115,8 @@ window.__ModuleLoader__.load({
       bindHint: 'The application keeps listening on 127.0.0.1 only; this option makes the plugin accept LAN traffic on the same port at this machine\'s LAN address and forward it.',
       lanAddress: 'LAN address',
       lanAddressHint: 'Leave empty to pick automatically (192.168 addresses first), or pin one of this machine\'s IPv4 addresses.',
+      lanPort: 'LAN port',
+      lanPortHint: 'Fixed port, default 3080, applied live. The application\'s own loopback port stays launch-assigned, so the desktop window is unaffected.',
       lanEndpoint: 'LAN entry',
       lanOff: 'off',
       lanError: 'The LAN proxy is not listening: {error}',
@@ -509,6 +513,25 @@ window.__ModuleLoader__.load({
               }),
             }),
             h(Field, {
+              key: 'lanPort',
+              id: 'web-access-lan-port',
+              label: t('lanPort'),
+              hint: t('lanPortHint'),
+              children: h('input', {
+                id: 'web-access-lan-port',
+                type: 'number',
+                min: 1,
+                max: 65535,
+                value: typeof draft?.lanPort === 'number' ? String(draft.lanPort) : '3080',
+                disabled: draft === null || bind === '127.0.0.1',
+                style: { ...controlStyle, width: '100%' },
+                onChange: (event) => {
+                  const next = Number(event.currentTarget.value)
+                  if (Number.isInteger(next) && next > 0 && next < 65536) patch({ lanPort: next })
+                },
+              }),
+            }),
+            h(Field, {
               key: 'trust',
               id: 'web-access-trust',
               label: t('trustedHosts'),
@@ -547,8 +570,6 @@ window.__ModuleLoader__.load({
                 : t('lanOff')),
               h('span', { key: 'k3', style: keyStyle }, t('liveTrust')),
               h('span', { key: 'v3' }, show(status?.trustLive)),
-              h('span', { key: 'k4', style: keyStyle }, t('origins')),
-              h('span', { key: 'v4' }, show(status?.origins)),
               h('span', { key: 'k5', style: keyStyle }, t('loginUrl')),
               h('span', { key: 'v5' }, show(status?.loginUrl)),
             ]),

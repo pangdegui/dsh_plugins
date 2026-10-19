@@ -96,6 +96,7 @@ async function readStatus(routes) {
 const config = {
   bind: '0.0.0.0',
   lanAddress: '127.0.0.2',
+  lanPort: appPort,
   autoTrustLocalIps: false,
   trustedHosts: ['10.1.2.3'],
   totpEnabled: false,

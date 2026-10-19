@@ -22,13 +22,14 @@ import { apply, Config } from '../lib/index.js'
   const config = result.value
   assert.equal(config.bind, '127.0.0.1', `bind resolves to its default string, got ${JSON.stringify(config.bind)}`)
   assert.equal(config.lanAddress, '', 'lanAddress defaults to auto')
+  assert.equal(config.lanPort, 3080, `lanPort defaults to the fixed 3080, got ${JSON.stringify(config.lanPort)}`)
   assert.equal(typeof config.autoTrustLocalIps, 'boolean', 'autoTrustLocalIps resolves to a boolean')
   assert.ok(Array.isArray(config.trustedHosts), 'trustedHosts resolves to an array')
   assert.equal(typeof config.totpEnabled, 'boolean', 'totpEnabled resolves to a boolean')
   assert.equal(config.totpGate, 'all', `totpGate resolves to its default string, got ${JSON.stringify(config.totpGate)}`)
 
   const filled = Config['~standard'].validate({ bind: '0.0.0.0', totpEnabled: true, totpGate: 'remote', autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'] })
-  assert.deepEqual(filled.value, { bind: '0.0.0.0', lanAddress: '', autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'], totpEnabled: true, totpGate: 'remote' }, 'a full config validates to plain values')
+  assert.deepEqual(filled.value, { bind: '0.0.0.0', lanAddress: '', lanPort: 3080, autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'], totpEnabled: true, totpGate: 'remote' }, 'a full config validates to plain values')
 }
 
 const routes = new Map()
