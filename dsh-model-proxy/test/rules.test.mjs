@@ -6,10 +6,7 @@
 
 import assert from 'node:assert/strict'
 import {
-  bypassesProxy,
   decideRoute,
-  isLoopback,
-  parseNoProxy,
   resolveProxyReference,
   ruleMatches,
   validateConfig,
@@ -48,196 +45,177 @@ test('refuses a malformed or empty URL', () => {
   assert.equal(validateProxyUrl(undefined).ok, false)
 })
 
-// --- noProxy -----------------------------------------------------------------
+// --- proxy references --------------------------------------------------------
 
-test('splits a noProxy list on commas and spaces', () => {
-  assert.deepEqual(parseNoProxy('a.com, b.com  c.com'), ['a.com', 'b.com', 'c.com'])
-  assert.deepEqual(parseNoProxy(''), [])
-  assert.deepEqual(parseNoProxy(undefined), [])
+test('resolves a named proxy to its URL', () => {
+  const result = resolveProxyReference('local', { local: 'http://127.0.0.1:10808' })
+  assert.deepEqual(result, { ok: true, url: 'http://127.0.0.1:10808' })
 })
 
-test('matches a host and its subdomains', () => {
-  const entries = parseNoProxy('example.com')
-  assert.equal(bypassesProxy(entries, new URL('http://example.com/x')), true)
-  assert.equal(bypassesProxy(entries, new URL('http://api.example.com/x')), true)
-  assert.equal(bypassesProxy(entries, new URL('http://notexample.com/x')), false)
+test('accepts a literal URL without a dictionary entry', () => {
+  const result = resolveProxyReference('http://10.0.0.2:3128', {})
+  assert.deepEqual(result, { ok: true, url: 'http://10.0.0.2:3128' })
 })
 
-test('honours a leading dot or star-dot', () => {
-  for (const written of ['.example.com', '*.example.com']) {
-    const entries = parseNoProxy(written)
-    assert.equal(bypassesProxy(entries, new URL('http://api.example.com/')), true, written)
-    assert.equal(bypassesProxy(entries, new URL('http://example.com/')), true, written)
-  }
+test('accepts direct as a rule target', () => {
+  assert.deepEqual(resolveProxyReference('direct', {}), { ok: true, url: 'direct' })
+  assert.deepEqual(resolveProxyReference('DIRECT', {}), { ok: true, url: 'direct' })
 })
 
-test('honours a port on an entry', () => {
-  const entries = parseNoProxy('example.com:8443')
-  assert.equal(bypassesProxy(entries, new URL('https://example.com:8443/')), true)
-  assert.equal(bypassesProxy(entries, new URL('https://example.com/')), false)
-})
-
-test('star bypasses everything', () => {
-  assert.equal(bypassesProxy(parseNoProxy('*'), new URL('https://anything.example/')), true)
-})
-
-// --- loopback ----------------------------------------------------------------
-
-test('detects the loopback block, not just 127.0.0.1', () => {
-  assert.equal(isLoopback('127.0.0.1'), true)
-  assert.equal(isLoopback('127.5.6.7'), true, 'the whole 127/8 range is loopback')
-  assert.equal(isLoopback('localhost'), true)
-  assert.equal(isLoopback('::1'), true)
-  assert.equal(isLoopback('example.com'), false)
-  assert.equal(isLoopback('10.0.0.1'), false)
+test('rejects an empty reference', () => {
+  assert.equal(resolveProxyReference('', {}).ok, false)
+  assert.equal(resolveProxyReference(undefined, {}).ok, false)
 })
 
 // --- rule matching -----------------------------------------------------------
 
-test('provider and model must both agree', () => {
-  const rule = { provider: 'command', model: 'deepseek/deepseek-v4.1-flash', proxy: 'local' }
-  assert.equal(ruleMatches(rule, { provider: 'command', model: 'deepseek/deepseek-v4.1-flash' }), true)
-  assert.equal(ruleMatches(rule, { provider: 'other', model: 'deepseek/deepseek-v4.1-flash' }), false)
-  assert.equal(ruleMatches(rule, { provider: 'command', model: 'z-ai/glm-5.3-flash' }), false)
+test('matches on provider alone', () => {
+  assert.equal(ruleMatches({ provider: 'command', proxy: 'x' }, { provider: 'command', model: 'any' }), true)
+  assert.equal(ruleMatches({ provider: 'command', proxy: 'x' }, { provider: 'other', model: 'any' }), false)
 })
 
-test('model matches with or without an endpoint suffix', () => {
-  const rule = { model: 'deepseek-v4-flash', proxy: 'local' }
-  assert.equal(ruleMatches(rule, { model: 'deepseek-v4-flash' }), true)
-  assert.equal(ruleMatches(rule, { model: 'deepseek-v4-flash@command' }), true, 'picker form still matches')
+test('matches on model alone', () => {
+  assert.equal(ruleMatches({ model: 'gpt-6', proxy: 'x' }, { model: 'gpt-6' }), true)
+  assert.equal(ruleMatches({ model: 'gpt-6', proxy: 'x' }, { model: 'gpt-7' }), false)
 })
 
-test('model supports a trailing wildcard', () => {
-  const rule = { model: 'deepseek/*', proxy: 'local' }
-  assert.equal(ruleMatches(rule, { model: 'deepseek/v4-flash' }), true)
-  assert.equal(ruleMatches(rule, { model: 'z-ai/glm' }), false)
+test('requires every declared field to agree', () => {
+  const rule = { provider: 'command', model: 'gpt-6', proxy: 'x' }
+  assert.equal(ruleMatches(rule, { provider: 'command', model: 'gpt-6' }), true)
+  assert.equal(ruleMatches(rule, { provider: 'command', model: 'gpt-7' }), false)
+  assert.equal(ruleMatches(rule, { provider: 'other', model: 'gpt-6' }), false)
 })
 
-test('host supports a wildcard suffix', () => {
-  const rule = { host: '*.commandcode.ai', proxy: 'local' }
-  assert.equal(ruleMatches(rule, { host: 'api.commandcode.ai' }), true)
-  assert.equal(ruleMatches(rule, { host: 'commandcode.ai' }), false, 'a wildcard needs the subdomain')
+test('a rule with no recognised field matches nothing', () => {
+  assert.equal(ruleMatches({ proxy: 'x' }, { provider: 'command', model: 'm' }), false)
+  assert.equal(ruleMatches({ nonsense: 'y', proxy: 'x' }, { model: 'm' }), false)
 })
 
-test('a rule with no fields matches nothing', () => {
-  assert.equal(ruleMatches({ proxy: 'local' }, { provider: 'x', model: 'y' }), false)
+test('model match tolerates an @endpoint suffix', () => {
+  assert.equal(ruleMatches({ model: 'gpt-6', proxy: 'x' }, { model: 'gpt-6@command' }), true)
+  assert.equal(ruleMatches({ model: 'gpt-6@command', proxy: 'x' }, { model: 'gpt-6' }), true)
 })
 
-// --- proxy references --------------------------------------------------------
-
-test('resolves a named proxy', () => {
-  assert.deepEqual(resolveProxyReference('local', { local: 'http://127.0.0.1:10808' }), {
-    ok: true,
-    url: 'http://127.0.0.1:10808',
-  })
+test('model match supports a trailing wildcard', () => {
+  assert.equal(ruleMatches({ model: 'deepseek/*', proxy: 'x' }, { model: 'deepseek/v4.1' }), true)
+  assert.equal(ruleMatches({ model: 'deepseek/*', proxy: 'x' }, { model: 'glm/5' }), false)
 })
 
-test('resolves a literal URL without a dictionary entry', () => {
-  assert.deepEqual(resolveProxyReference('http://127.0.0.1:9000', {}), { ok: true, url: 'http://127.0.0.1:9000' })
-})
+// --- routing ----------------------------------------------------------------
 
-test('resolves the direct and system keywords', () => {
-  assert.deepEqual(resolveProxyReference('direct', {}), { ok: true, url: 'direct' })
-  assert.deepEqual(resolveProxyReference('system', {}), { ok: true, url: 'system' })
-})
-
-test('reports an unknown name rather than inventing a URL', () => {
-  assert.equal(resolveProxyReference('missing', {}).ok, false)
-})
-
-// --- route decisions ---------------------------------------------------------
-
-const base = { noProxy: [], rules: [], proxies: {}, defaultMode: 'system' }
-
-test('loopback is direct even with a matching rule', () => {
+test('a matching rule sends the model through its proxy', () => {
   const decision = decideRoute({
-    ...base,
-    rules: [{ provider: 'x', proxy: 'http://p:1' }],
-    provider: 'x',
-    host: '127.0.0.1',
+    rules: [{ model: 'gpt-6', proxy: 'local' }],
+    proxies: { local: 'http://127.0.0.1:10808' },
+    model: 'gpt-6',
   })
-  assert.deepEqual(decision, { kind: 'direct', from: 'loopback' })
+  assert.equal(decision.kind, 'proxy')
+  assert.equal(decision.url, 'http://127.0.0.1:10808')
 })
 
-test('noProxy wins over a matching rule', () => {
+test('a rule can force one model direct', () => {
   const decision = decideRoute({
-    ...base,
-    noProxy: parseNoProxy('api.example.com'),
-    rules: [{ host: 'api.example.com', proxy: 'http://p:1' }],
-    host: 'api.example.com',
+    rules: [{ model: 'gpt-6', proxy: 'direct' }],
+    proxies: {},
+    model: 'gpt-6',
   })
   assert.equal(decision.kind, 'direct')
-  assert.equal(decision.from, 'noProxy')
 })
 
-test('the first matching rule wins', () => {
+test('first match wins', () => {
   const decision = decideRoute({
-    ...base,
-    proxies: { a: 'http://a:1', b: 'http://b:2' },
     rules: [
-      { provider: 'x', model: 'm', proxy: 'a' },
-      { provider: 'x', proxy: 'b' },
+      { provider: 'command', proxy: 'a' },
+      { model: 'gpt-6', proxy: 'b' },
     ],
-    provider: 'x',
-    model: 'm',
+    proxies: { a: 'http://a:1', b: 'http://b:2' },
+    provider: 'command',
+    model: 'gpt-6',
   })
-  assert.deepEqual(decision, { kind: 'proxy', url: 'http://a:1', from: 'rule#1' })
+  assert.equal(decision.url, 'http://a:1')
 })
 
-test('defaultMode applies when nothing matched', () => {
-  assert.equal(decideRoute({ ...base, provider: 'x' }).kind, 'inherit')
-  assert.equal(decideRoute({ ...base, defaultMode: 'direct', provider: 'x' }).kind, 'direct')
-})
-
-test('an invalid rule proxy falls back to inherit rather than guessing', () => {
+test('an unmatched model is left completely alone', () => {
   const decision = decideRoute({
-    ...base,
-    rules: [{ provider: 'x', proxy: 'missing-name' }],
-    provider: 'x',
+    rules: [{ model: 'gpt-6', proxy: 'local' }],
+    proxies: { local: 'http://127.0.0.1:10808' },
+    model: 'something-else',
   })
-  assert.equal(decision.kind, 'inherit')
+  assert.equal(decision.kind, 'unrouted')
+  assert.equal(decision.from, 'no-rule')
+})
+
+test('an empty rule list leaves every model alone', () => {
+  assert.equal(decideRoute({ rules: [], proxies: {}, model: 'gpt-6' }).kind, 'unrouted')
+})
+
+test('a broken rule degrades to unrouted rather than direct', () => {
+  const decision = decideRoute({
+    rules: [{ model: 'gpt-6', proxy: 'missing-name' }],
+    proxies: {},
+    model: 'gpt-6',
+  })
+  assert.equal(decision.kind, 'unrouted')
   assert.match(decision.from, /invalid/)
+})
+
+test('routing never looks at host, so unrelated traffic is out of scope', () => {
+  // A decision is a pure function of model identity: passing a host-looking
+  // value as the model must not turn it into a host match.
+  const decision = decideRoute({
+    rules: [{ model: 'api.example.com', proxy: 'local' }],
+    proxies: { local: 'http://127.0.0.1:10808' },
+    provider: 'command',
+    model: 'gpt-6',
+  })
+  assert.equal(decision.kind, 'unrouted')
 })
 
 // --- config validation -------------------------------------------------------
 
-test('accepts the shipped default config', () => {
-  assert.deepEqual(validateConfig({
-    global: { mode: 'system', url: '', noProxy: '' },
-    proxies: {},
-    rules: [],
-    defaultMode: 'system',
-    log: false,
-  }), [])
+test('a usable config has no problems', () => {
+  const problems = validateConfig({
+    proxies: { local: 'http://127.0.0.1:10808' },
+    rules: [{ model: 'gpt-6', proxy: 'local' }],
+  })
+  assert.deepEqual(problems, [])
 })
 
-test('reports an unknown global mode', () => {
-  const problems = validateConfig({ global: { mode: 'warp' } })
+test('reports a bad proxy URL', () => {
+  const problems = validateConfig({ proxies: { local: 'socks5://127.0.0.1:1080' }, rules: [] })
   assert.equal(problems.length, 1)
-  assert.match(problems[0], /global\.mode/)
+  assert.match(problems[0], /proxies\.local/)
 })
 
-test('reports a proxy mode with no URL', () => {
-  const problems = validateConfig({ global: { mode: 'proxy', url: '' } })
-  assert.match(problems.join('\n'), /global\.url/)
+test('reports a rule with no matching field', () => {
+  const problems = validateConfig({ proxies: {}, rules: [{ proxy: 'direct' }] })
+  assert.equal(problems.length, 1)
+  assert.match(problems[0], /needs at least one of provider \/ model/)
 })
 
-test('reports a rule with no fields and a rule with no proxy', () => {
-  const problems = validateConfig({ rules: [{ proxy: 'http://p:1' }, { provider: 'x' }] })
-  assert.match(problems.join('\n'), /rules\[1\]: needs at least one/)
-  assert.match(problems.join('\n'), /rules\[2\]: needs a proxy/)
+test('reports a rule with no proxy', () => {
+  const problems = validateConfig({ proxies: {}, rules: [{ model: 'gpt-6' }] })
+  assert.equal(problems.length, 1)
+  assert.match(problems[0], /needs a proxy/)
 })
 
-test('reports a bad named proxy', () => {
-  const problems = validateConfig({ proxies: { bad: 'socks5://127.0.0.1:1' } })
-  assert.match(problems.join('\n'), /proxies\.bad/)
+test('reports a rule naming an unknown proxy', () => {
+  const problems = validateConfig({ proxies: {}, rules: [{ model: 'gpt-6', proxy: 'nope' }] })
+  assert.equal(problems.length, 1)
+  assert.match(problems[0], /not a valid URL|empty/)
 })
 
-// --- report ------------------------------------------------------------------
+test('reports rules that are not an array', () => {
+  const problems = validateConfig({ proxies: {}, rules: { model: 'gpt-6' } })
+  assert.equal(problems.length, 1)
+  assert.match(problems[0], /must be an array/)
+})
+
+// --- summary -----------------------------------------------------------------
 
 if (failures.length > 0) {
-  console.error(`\n${failures.length} failed, ${passed} passed\n`)
-  for (const failure of failures) console.error(`  ✗ ${failure}`)
+  console.error(`${failures.length} failed, ${passed} passed`)
+  for (const failure of failures) console.error(`  ${failure}`)
   process.exitCode = 1
 } else {
   console.log(`${passed} passed`)

@@ -37,11 +37,17 @@ async function test(label, fn) {
 /**
  * A Cordis context stand-in: enough surface for `apply()` to register its
  * effects, listeners and routes, and to be inspected afterwards.
+ *
+ * `configEditor` is optional: passing `editor` models a profile where the
+ * plugin's own row can be written, and omitting it models one where it cannot,
+ * which is how the "changes will not survive a restart" path is reached.
  */
-function fakeContext() {
+function fakeContext({ editor, llm } = {}) {
   const routes = []
   const listeners = []
   const logs = []
+  const writes = []
+  const effects = []
   const services = new Map([
     ['webServer', {
       register: (route) => {
@@ -58,6 +64,21 @@ function fakeContext() {
     ['connection', { requestRejection: () => undefined }],
   ])
 
+  // The settings page's model list comes from the `llm` service; a profile
+  // without one must render an empty list rather than fail, so `llm` stays
+  // optional here too.
+  if (llm !== undefined) services.set('llm', llm)
+
+  if (editor !== 'absent') {
+    services.set('configEditor', {
+      // One addressable row, id `model-proxy`, as the bundle patch declares it.
+      entries: () => [{ options: { id: 'model-proxy', name: 'dsh-model-proxy' } }],
+      edit: async (entry, change) => {
+        writes.push({ entry, next: change({}, {}) })
+      },
+    })
+  }
+
   const ctx = {
     logger: {
       info: (line) => logs.push(`info ${line}`),
@@ -72,6 +93,7 @@ function fakeContext() {
     },
     effect(fn) {
       const disposer = typeof fn === 'function' ? fn() : undefined
+      effects.push(disposer)
       return { dispose: disposer }
     },
     get(service) {
@@ -87,7 +109,7 @@ function fakeContext() {
   // `webCtx.webServer.register(...)` would fail here and pass in production.
   for (const [service, value] of services) ctx[service] = value
 
-  return { ctx, routes, listeners, logs }
+  return { ctx, routes, listeners, logs, writes, effects }
 }
 
 await test('exports the shape Cordis loads', () => {
@@ -96,114 +118,230 @@ await test('exports the shape Cordis loads', () => {
   assert.ok(Array.isArray(module.inject))
 })
 
-await test('registers the three panel routes exactly once each', () => {
+await test('registers every route exactly once each', () => {
   const { ctx, routes } = fakeContext()
   module.apply(ctx, {})
   const paths = routes.map((route) => route.path).sort()
-  assert.deepEqual(paths, ['/model-proxy', '/model-proxy/apply', '/model-proxy/status'])
-  for (const route of routes) assert.equal(route.kind, 'exact')
+  assert.deepEqual(paths, [
+    '/model-proxy',
+    '/model-proxy/apply',
+    '/model-proxy/models',
+    '/model-proxy/status',
+  ])
+  assert.ok(routes.every((route) => route.kind === 'exact'))
 })
 
-await test('subscribes to llm/stream as a prepended global listener', () => {
+await test('intercepts llm/stream and nothing else', () => {
   const { ctx, listeners } = fakeContext()
   module.apply(ctx, {})
-  const stream = listeners.find((entry) => entry.event === 'llm/stream')
-  assert.ok(stream !== undefined, 'llm/stream must be intercepted')
-  assert.equal(typeof stream.handler, 'function')
+  const events = listeners.map((entry) => entry.event)
+  assert.deepEqual(events, ['llm/stream'])
 })
 
-await test('a config with problems still loads the plugin', () => {
-  const { ctx, routes } = fakeContext()
-  module.apply(ctx, { global: { mode: 'nonsense' }, rules: [{ provider: 'x' }] })
-  assert.equal(routes.length, 3, 'routes must be registered even when the config is wrong')
+await test('never installs a process-wide dispatcher', () => {
+  const { ctx } = fakeContext()
+  module.apply(ctx, {})
+  // The claim behind "models only": if this plugin had called
+  // setGlobalDispatcher, unrelated traffic would be affected. Check that the
+  // global dispatcher still answers with whatever it answered before.
+  const undiciModule = 'module' in resolved ? resolved.module : undefined
+  if (undiciModule !== undefined) {
+    const before = undiciModule.getGlobalDispatcher()
+    const { ctx: other } = fakeContext()
+    module.apply(other, { proxy: 'http://127.0.0.1:9', models: ['gpt-6'] })
+    assert.equal(undiciModule.getGlobalDispatcher(), before, 'the global dispatcher must be untouched')
+  }
 })
 
-await test('the panel renders and reports the active policy', async () => {
+await test('the bare panel path redirects to the settings page', async () => {
   const { ctx, routes } = fakeContext()
-  module.apply(ctx, {
-    global: { mode: 'proxy', url: 'http://127.0.0.1:10808', noProxy: '' },
-    proxies: { local: 'http://127.0.0.1:10808' },
-    rules: [{ provider: 'command', model: 'deepseek/deepseek-v4.1-flash', proxy: 'local' }],
-  })
-
+  module.apply(ctx, {})
   const panel = routes.find((route) => route.path === '/model-proxy')
-  const response = await invoke(panel.handler, 'GET', '/model-proxy', '', {
-    host: '127.0.0.1:3000',
-  })
-
-  assert.equal(response.status, 200)
-  assert.match(response.body, /模型代理/)
-  assert.match(response.body, /deepseek\/deepseek-v4\.1-flash/)
-  assert.match(response.body, /http:\/\/127\.0\.0\.1:10808/)
+  const response = await invoke(panel.handler, 'GET', '/model-proxy', '')
+  // The form lives in Settings now (`lib/client.js`); a stale bookmark must not
+  // land on a second, divergent copy of it.
+  assert.equal(response.status, 303)
+  assert.equal(response.headers.location, '/')
+  assert.match(response.body, /设置/)
 })
 
-await test('the status route answers JSON', async () => {
+await test('the status route carries what the settings page renders', async () => {
   const { ctx, routes } = fakeContext()
-  module.apply(ctx, { global: { mode: 'direct' } })
+  module.apply(ctx, {})
   const status = routes.find((route) => route.path === '/model-proxy/status')
   const response = await invoke(status.handler, 'GET', '/model-proxy/status', '')
+  assert.equal(response.status, 200)
+  // The browser half reads exactly these keys; a rename here silently blanks a
+  // field in the UI, so hold the wire shape still.
+  for (const key of ['transport', 'problems', 'active', 'proxy', 'models', 'log', 'ruleCount', 'recent']) {
+    assert.ok(Object.hasOwn(JSON.parse(response.body), key), `status must expose ${key}`)
+  }
+})
 
+await test('status reports the configured proxy and the models it covers', async () => {
+  const { ctx, routes } = fakeContext()
+  module.apply(ctx, {
+    proxy: 'http://127.0.0.1:10808',
+    models: ['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash'],
+  })
+  const status = routes.find((route) => route.path === '/model-proxy/status')
+  const response = await invoke(status.handler, 'GET', '/model-proxy/status', '')
+  assert.equal(response.status, 200)
+  const body = JSON.parse(response.body)
+  assert.equal(body.proxy, 'http://127.0.0.1:10808')
+  assert.deepEqual(body.models, ['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash'])
+  assert.equal(body.ruleCount, 2, 'one compiled rule per ticked model')
+  assert.equal(typeof body.log, 'boolean', 'the log flag is what the page renders')
+})
+
+await test('the models route lists what the deployment offers', async () => {
+  const { ctx, routes } = fakeContext({
+    llm: {
+      listProviders: () => [
+        { id: 'command', name: 'Command' },
+        { id: 'broken', name: 'Broken' },
+      ],
+      listModels: async (provider) => {
+        if (provider === 'broken') throw new Error('adapter is down')
+        return [
+          { provider, id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash command' },
+        ]
+      },
+    },
+  })
+  module.apply(ctx, {})
+  const models = routes.find((route) => route.path === '/model-proxy/models')
+  const response = await invoke(models.handler, 'GET', '/model-proxy/models', '')
   assert.equal(response.status, 200)
   const body = JSON.parse(response.body)
   assert.equal(body.ok, true)
-  assert.equal(body.global.mode, 'direct')
+  assert.equal(body.providers.length, 2)
+  assert.deepEqual(body.providers[0].models, [
+    { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash command' },
+  ])
+  // One broken provider must not hide the others.
+  assert.deepEqual(body.providers[1].models, [])
 })
 
-await test('a form POST applies the new global policy', async () => {
+await test('the models route answers empty when no model service exists', async () => {
   const { ctx, routes } = fakeContext()
-  module.apply(ctx, { global: { mode: 'system' } })
+  module.apply(ctx, {})
+  const models = routes.find((route) => route.path === '/model-proxy/models')
+  const body = JSON.parse((await invoke(models.handler, 'GET', '/model-proxy/models', '')).body)
+  assert.equal(body.ok, true)
+  assert.deepEqual(body.providers, [])
+})
+
+await test('a JSON POST persists through the config editor', async () => {
+  const { ctx, routes, writes } = fakeContext()
+  module.apply(ctx, {})
   const apply = routes.find((route) => route.path === '/model-proxy/apply')
 
-  const form = new URLSearchParams({
-    action: 'apply',
-    globalMode: 'proxy',
-    globalUrl: 'http://127.0.0.1:19999',
-    noProxy: '*.internal',
-    proxies: 'local: http://127.0.0.1:10808',
-    rules: 'provider: command model: deepseek/v4 proxy: local',
-    defaultMode: 'system',
-    log: 'off',
-  }).toString()
-
-  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', form, {
-    'content-type': 'application/x-www-form-urlencoded',
+  const body = JSON.stringify({
+    proxy: 'http://127.0.0.1:10808',
+    models: ['deepseek/deepseek-v4.1-flash'],
+    log: false,
   })
 
-  assert.equal(response.status, 200)
-  assert.match(response.body, /全局代理已应用/)
-  assert.match(response.body, /http:\/\/127\.0\.0\.1:19999/)
+  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', body, {
+    'content-type': 'application/json',
+  })
+
+  assert.equal(response.status, 202, 'a persisted write asks the page to reload')
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].next.proxy, 'http://127.0.0.1:10808')
+  assert.deepEqual(writes[0].next.models, ['deepseek/deepseek-v4.1-flash'])
+  assert.equal(writes[0].next.log, false)
+  assert.match(response.body, /已保存到配置文件/)
 })
 
-await test('a POST with an invalid mode is refused and changes nothing', async () => {
-  const { ctx, routes } = fakeContext()
-  module.apply(ctx, { global: { mode: 'direct' } })
+await test('a POST without a config editor applies in memory and says so', async () => {
+  const { ctx, routes } = fakeContext({ editor: 'absent' })
+  module.apply(ctx, {})
   const apply = routes.find((route) => route.path === '/model-proxy/apply')
 
-  const form = new URLSearchParams({
-    action: 'apply',
-    globalMode: 'warp',
-    globalUrl: '',
-    noProxy: '',
-    proxies: '',
-    rules: '',
-    defaultMode: 'system',
-    log: 'off',
-  }).toString()
+  const body = JSON.stringify({ proxy: 'http://127.0.0.1:10808', models: ['gpt-6'], log: false })
+  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', body)
+  assert.equal(response.status, 200)
+  assert.match(response.body, /配置编辑器不可用/)
 
-  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', form)
+  const status = routes.find((route) => route.path === '/model-proxy/status')
+  const view = JSON.parse((await invoke(status.handler, 'GET', '/model-proxy/status', '')).body)
+  assert.equal(view.ruleCount, 1, 'the change still applies for this run')
+})
+
+await test('a POST with an invalid proxy is refused and changes nothing', async () => {
+  const { ctx, routes, writes } = fakeContext()
+  module.apply(ctx, {})
+  const apply = routes.find((route) => route.path === '/model-proxy/apply')
+
+  const body = JSON.stringify({ proxy: 'socks5://127.0.0.1:1080', models: ['gpt-6'] })
+  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', body)
 
   assert.equal(response.status, 400)
-  assert.match(response.body, /global\.mode/)
+  assert.match(response.body, /SOCKS/)
+  assert.equal(writes.length, 0, 'nothing may be written for an invalid config')
 })
 
-await test('reset switches to direct', async () => {
-  const { ctx, routes } = fakeContext()
-  module.apply(ctx, { global: { mode: 'proxy', url: 'http://127.0.0.1:10808' } })
+await test('a POST with models but no proxy is refused', async () => {
+  const { ctx, routes, writes } = fakeContext()
+  module.apply(ctx, {})
+  const apply = routes.find((route) => route.path === '/model-proxy/apply')
+  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', JSON.stringify({
+    proxy: '',
+    models: ['gpt-6'],
+  }))
+  assert.equal(response.status, 400)
+  assert.equal(writes.length, 0)
+})
+
+await test('a malformed body is refused, not applied', async () => {
+  const { ctx, routes, writes } = fakeContext()
+  module.apply(ctx, {})
+  const apply = routes.find((route) => route.path === '/model-proxy/apply')
+  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', '{not json')
+  assert.equal(response.status, 400)
+  assert.equal(writes.length, 0)
+})
+
+await test('clearing the models stops routing without touching the proxy', async () => {
+  const { ctx, routes, writes } = fakeContext()
+  module.apply(ctx, { proxy: 'http://127.0.0.1:10808', models: ['gpt-6'] })
   const apply = routes.find((route) => route.path === '/model-proxy/apply')
 
-  const response = await invoke(apply.handler, 'POST', '/model-proxy/apply', 'action=reset')
-  assert.equal(response.status, 200)
-  assert.match(response.body, /全局代理已应用：direct/)
+  const response = await invoke(
+    apply.handler,
+    'POST',
+    '/model-proxy/apply',
+    JSON.stringify({ proxy: 'http://127.0.0.1:10808', models: [], log: false }),
+  )
+  assert.equal(response.status, 202)
+  assert.equal(writes.length, 1)
+  assert.deepEqual(writes[0].next.models, [])
+  const body = JSON.parse(response.body)
+  assert.equal(body.ruleCount, 0, 'no ticked model means no routing')
+})
+
+await test('a legacy { proxies, rules } config is migrated, not dropped', async () => {
+  const { ctx, routes } = fakeContext()
+  module.apply(ctx, {
+    proxies: { local: 'http://127.0.0.1:10808' },
+    rules: [{ model: 'deepseek/v4', proxy: 'local' }],
+  })
+  const status = routes.find((route) => route.path === '/model-proxy/status')
+  const body = JSON.parse((await invoke(status.handler, 'GET', '/model-proxy/status', '')).body)
+  assert.equal(body.proxy, 'http://127.0.0.1:10808')
+  assert.deepEqual(body.models, ['deepseek/v4'])
+  assert.equal(body.ruleCount, 1)
+})
+
+await test('the Host fence is honoured', async () => {
+  const { ctx, routes } = fakeContext()
+  ctx.connection.requestRejection = () => 403
+  module.apply(ctx, {})
+  const panel = routes.find((route) => route.path === '/model-proxy')
+  const response = await invoke(panel.handler, 'GET', '/model-proxy', '')
+  assert.equal(response.status, 403)
 })
 
 await test('an unknown path answers 404', async () => {

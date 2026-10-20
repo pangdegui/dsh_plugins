@@ -1,7 +1,7 @@
 {
   "name": "dsh-model-proxy",
   "version": "0.1.0",
-  "description": "Outbound proxy control for DeepSeek Harness: switch the global proxy at runtime and route individual models through their own proxy, from one panel.",
+  "description": "Route individual models through their own proxy in DeepSeek Harness. Only model requests are affected; everything else keeps its original network path.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -10,12 +10,16 @@
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "dependencies": {
@@ -25,5 +29,4 @@
     "lib/",
     "cordis.patch.yml",
     "README.md"
-  ]
-}
+  ]}

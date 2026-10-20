@@ -12,17 +12,13 @@
 export const SUPPORTED_PROXY_PROTOCOLS = new Set(['http:', 'https:'])
 
 /**
- * Loopback hosts are never proxied. This mirrors the official policy in
- * `@deepseek-ai/dsh-http-proxy`, and it is not optional: proxying the harness's
- * own Web UI or connection transport turns them into a routing loop.
+ * The rule fields that can decide a route.
  *
- * Both `::1` and `[::1]` are listed because a bare `::1` is read by some
- * matchers as host `:` port `1`.
+ * Only model identity is here — no host. A host rule would have to be evaluated
+ * on requests this plugin never sees a model for (model discovery, web fetch),
+ * and covering those is exactly what "proxy for models only" rules out.
  */
-export const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'])
-
-/** The three global modes, plus `proxy`, which carries a URL. */
-export const GLOBAL_MODES = new Set(['system', 'direct', 'proxy'])
+export const RULE_FIELDS = ['provider', 'model']
 
 /**
  * Parse a proxy URL, refusing anything the transport cannot route.
@@ -52,118 +48,11 @@ export function validateProxyUrl(raw) {
 }
 
 /**
- * Normalize one entry of the `noProxy` list. Accepts the comma/space separated
- * string a person writes and returns its non-empty entries.
- *
- * @param {unknown} raw the bypass list as configured.
- * @returns {string[]} the entries, trimmed, in the order written.
- */
-export function parseNoProxy(raw) {
-  if (typeof raw !== 'string') return []
-  return raw
-    .split(/[,\s]+/)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== '')
-}
-
-/**
- * Whether `hostname` is a loopback literal or name.
- *
- * @param {string} hostname a URL's hostname, without a port.
- * @returns {boolean} true when the address must stay direct.
- */
-export function isLoopback(hostname) {
-  const host = String(hostname ?? '').toLowerCase()
-  if (LOOPBACK_HOSTNAMES.has(host)) return true
-  // 127.0.0.0/8 — the whole block is loopback, not just 127.0.0.1.
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true
-  // IPv4-mapped loopback, e.g. ::ffff:127.0.0.1
-  if (/^::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true
-  return false
-}
-
-/**
- * Whether `url` is exempted by a `noProxy` list entry.
- *
- * A bare entry matches that host and every subdomain of it, so `example.com`
- * also bypasses `api.example.com`. A leading `.` or `*.` is accepted and means
- * the same thing. An entry may carry `:port`, and `*` bypasses everything.
- * CIDR ranges are deliberately not matched: `noProxy` entries name hosts, and a
- * range would have to be rewritten as a suffix anyway.
- *
- * @param {string[]} entries the bypass list from {@link parseNoProxy}.
- * @param {URL} url the request URL.
- * @returns {boolean} true when the request must not be proxied.
- */
-export function bypassesProxy(entries, url) {
-  if (entries.length === 0) return false
-  const host = stripBrackets(url.hostname.toLowerCase())
-  const port = url.port === '' ? defaultPort(url.protocol) : Number(url.port)
-
-  for (const entry of entries) {
-    if (entry === '*') return true
-
-    // `[::1]:8080` — an IPv6 literal with an optional port.
-    let pattern = entry.toLowerCase()
-    let entryPort = 0
-    if (pattern.startsWith('[')) {
-      const closing = pattern.indexOf(']')
-      if (closing !== -1) {
-        const rest = pattern.slice(closing + 1)
-        pattern = stripBrackets(pattern.slice(0, closing + 1))
-        if (rest.startsWith(':')) {
-          const parsed = Number.parseInt(rest.slice(1), 10)
-          entryPort = Number.isNaN(parsed) ? 0 : parsed
-        }
-      }
-    } else if (pattern.includes(':') && pattern.split(':').length === 2) {
-      const [name, rawPort] = pattern.split(':')
-      const parsed = Number.parseInt(rawPort, 10)
-      if (!Number.isNaN(parsed)) {
-        pattern = name
-        entryPort = parsed
-      }
-    } else {
-      pattern = stripBrackets(pattern)
-    }
-
-    if (entryPort !== 0 && entryPort !== port) continue
-
-    if (pattern.startsWith('*.')) pattern = pattern.slice(2)
-    else if (pattern.startsWith('.') || pattern.startsWith('*')) pattern = pattern.slice(1)
-    if (pattern === '') continue
-
-    if (host === pattern) return true
-    if (host.endsWith(`.${pattern}`)) return true
-  }
-  return false
-}
-
-/**
- * The default port of a URL scheme, for a `noProxy` entry that names one.
- *
- * @param {string} protocol a URL protocol, e.g. `https:`.
- * @returns {number} the port the scheme implies.
- */
-function defaultPort(protocol) {
-  return protocol === 'https:' ? 443 : 80
-}
-
-/**
- * Strip the square brackets a URL puts around an IPv6 literal.
- *
- * @param {string} host a hostname, possibly bracketed.
- * @returns {string} the bare host.
- */
-function stripBrackets(host) {
-  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
-}
-
-/**
  * Compile one `proxy` reference into a concrete URL.
  *
  * A reference is either a name in `proxies` or a literal URL, so a one-off rule
- * needs no dictionary entry.
+ * needs no dictionary entry. `direct` is accepted because a rule may want to
+ * pull one model out of a proxy the others use.
  *
  * @param {unknown} reference the configured value.
  * @param {Record<string, string>} proxies named proxy URLs.
@@ -177,10 +66,9 @@ export function resolveProxyReference(reference, proxies) {
   if (Object.hasOwn(proxies, value)) {
     return validateProxyUrl(proxies[value])
   }
-  // `direct` / `system` are modes, not URLs; a rule may use them too.
-  const lowered = value.toLowerCase()
-  if (lowered === 'direct' || lowered === 'system') {
-    return { ok: true, url: lowered }
+  // `direct` is a mode, not a URL; a rule may use it.
+  if (value.toLowerCase() === 'direct') {
+    return { ok: true, url: 'direct' }
   }
   return validateProxyUrl(value)
 }
@@ -194,7 +82,7 @@ export function resolveProxyReference(reference, proxies) {
  * the waterfall receives the former while the model picker shows the latter.
  *
  * @param {object} rule one configured rule.
- * @param {{ provider?: string, model?: string, host?: string }} request what is known about this request.
+ * @param {{ provider?: string, model?: string }} request what is known about this request.
  * @returns {boolean} true when every declared field agrees.
  */
 export function ruleMatches(rule, request) {
@@ -210,11 +98,6 @@ export function ruleMatches(rule, request) {
   if (rule.model !== undefined) {
     declared += 1
     if (!modelMatches(String(rule.model), String(request.model ?? ''))) return false
-  }
-
-  if (rule.host !== undefined) {
-    declared += 1
-    if (!hostMatches(String(rule.host), String(request.host ?? ''))) return false
   }
 
   // A rule that constrains nothing would swallow every request; require at
@@ -241,72 +124,43 @@ function modelMatches(pattern, actual) {
 }
 
 /**
- * Compare a configured host against a request's host.
- *
- * Exact, a `*.suffix` wildcard, or a `host:port` form.
- *
- * @param {string} pattern the configured host field.
- * @param {string} actual the request host, possibly with a port.
- * @returns {boolean} true when the pattern covers the host.
- */
-function hostMatches(pattern, actual) {
-  if (pattern === actual) return true
-  if (pattern.startsWith('*.')) return actual.endsWith(pattern.slice(1))
-  const bareHost = (value) => (value.includes(':') ? value.slice(0, value.indexOf(':')) : value)
-  return bareHost(pattern) === bareHost(actual)
-}
-
-/**
- * Decide how to send one request.
+ * Decide how to send one model request.
  *
  * Resolution order, first hit wins:
- *   1. loopback host → `direct` (never proxied, not configurable)
- *   2. `noProxy` list → `direct`
- *   3. the first matching rule
- *   4. `defaultMode`
+ *   1. a rule matches → its proxy, or `direct`
+ *   2. nothing matched → `unrouted`, i.e. leave the request alone
  *
- * The result is deliberately one of three shapes so the caller never has to
- * invent a meaning for an empty string:
- *   - `{ kind: 'inherit' }` — leave whatever the global layer installed
- *   - `{ kind: 'direct' }`  — bypass, including any global policy
- *   - `{ kind: 'proxy', url }` — tunnel through this proxy
+ * `unrouted` is the important default and not an alias for `direct`: it means
+ * the wrapper does not touch this request at all, so it takes the same network
+ * path it would have taken without the plugin — normally the launcher's
+ * environment proxy. Returning `direct` here would silently override a proxy the
+ * user configured elsewhere, which is not this plugin's decision to make.
+ *
+ * The result is one of three shapes so the caller never has to invent a meaning
+ * for an empty string:
+ *   - `{ kind: 'unrouted' }` — do not touch the request
+ *   - `{ kind: 'direct' }`  — bypass every proxy for this model
+ *   - `{ kind: 'proxy', url }` — tunnel this model through this proxy
  *
  * @param {object} options the resolved configuration plus request facts.
- * @returns {{ kind: 'inherit' } | { kind: 'direct' } | { kind: 'proxy', url: string, from: string }}
+ * @returns {{ kind: 'unrouted', from: string } | { kind: 'direct', from: string } | { kind: 'proxy', url: string, from: string }}
  */
-export function decideRoute({ noProxy = [], rules = [], proxies = {}, defaultMode = 'system', provider, model, host }) {
-  const request = { provider, model, host }
-
-  if (host !== undefined && isLoopback(host)) {
-    return { kind: 'direct', from: 'loopback' }
-  }
-
-  if (host !== undefined) {
-    let url
-    try {
-      url = new URL(`http://${host}`)
-    } catch {
-      url = undefined
-    }
-    if (url !== undefined && bypassesProxy(noProxy, url)) {
-      return { kind: 'direct', from: 'noProxy' }
-    }
-  }
+export function decideRoute({ rules = [], proxies = {}, provider, model }) {
+  const request = { provider, model }
 
   for (const [index, rule] of rules.entries()) {
     if (!ruleMatches(rule, request)) continue
     const target = resolveProxyReference(rule.proxy, proxies)
     if (!target.ok) {
-      return { kind: 'inherit', from: `rule#${index + 1}-invalid: ${target.reason}` }
+      // A broken rule must not silently become "no proxy": report it as
+      // unrouted so the request keeps whatever path it already had.
+      return { kind: 'unrouted', from: `rule#${index + 1}-invalid: ${target.reason}` }
     }
     if (target.url === 'direct') return { kind: 'direct', from: `rule#${index + 1}` }
-    if (target.url === 'system') return { kind: 'inherit', from: `rule#${index + 1}` }
     return { kind: 'proxy', url: target.url, from: `rule#${index + 1}` }
   }
 
-  const fallback = String(defaultMode ?? 'system').toLowerCase()
-  if (fallback === 'direct') return { kind: 'direct', from: 'default' }
-  return { kind: 'inherit', from: 'default' }
+  return { kind: 'unrouted', from: 'no-rule' }
 }
 
 /**
@@ -319,16 +173,6 @@ export function decideRoute({ noProxy = [], rules = [], proxies = {}, defaultMod
 export function validateConfig(config) {
   const problems = []
   if (config === null || typeof config !== 'object') return ['config must be an object']
-
-  const global = config.global ?? {}
-  const mode = String(global.mode ?? 'system').toLowerCase()
-  if (!GLOBAL_MODES.has(mode)) {
-    problems.push(`global.mode must be one of system / direct / proxy, got "${String(global.mode)}"`)
-  }
-  if (mode === 'proxy') {
-    const checked = validateProxyUrl(global.url)
-    if (!checked.ok) problems.push(`global.url: ${checked.reason}`)
-  }
 
   for (const [name, url] of Object.entries(config.proxies ?? {})) {
     const checked = validateProxyUrl(url)
@@ -345,9 +189,9 @@ export function validateConfig(config) {
       problems.push(`${label}: must be an object`)
       continue
     }
-    const fields = ['provider', 'model', 'host'].filter((field) => rule[field] !== undefined)
+    const fields = ['provider', 'model'].filter((field) => rule[field] !== undefined)
     if (fields.length === 0) {
-      problems.push(`${label}: needs at least one of provider / model / host`)
+      problems.push(`${label}: needs at least one of provider / model`)
     }
     if (rule.proxy === undefined) {
       problems.push(`${label}: needs a proxy`)

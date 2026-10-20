@@ -1,39 +1,37 @@
 /**
  * `dsh-model-proxy` — Host half.
  *
- * Two capabilities, one plugin:
+ * **One capability: send the models you tick through the proxy you configure.**
+ * A request is matched by model id against the ticked list; a match is tunnelled
+ * through the proxy, and anything else is left exactly as it was. Nothing else
+ * in the process changes.
  *
- *   1. **Global proxy switch.** Replaces the process-wide undici dispatcher at
- *      runtime, so a proxy can be turned on, changed, or turned off without
- *      restarting the app. Verified against the runtime: the disposer semantics
- *      the official launcher relies on work at any time, not only at boot.
- *
- *   2. **Per-model routing.** Intercepts the `llm/stream` waterfall, resolves a
- *      rule from `options.provider` / `options.model`, and carries that decision
- *      into the request through `AsyncLocalStorage` (see `transport.js`). This is
- *      the only way to give two models on the same endpoint different proxies:
- *      a process-wide dispatcher has exactly one answer.
+ * That scope is the whole point, and it is why there is no global switch here.
+ * The official `@deepseek-ai/dsh-http-proxy` installs one process-wide undici
+ * dispatcher at launch; re-installing it would move *every* request — web
+ * fetches, plugin installs, telemetry — while the configuration only ever talks
+ * about models. So the plugin never calls `setGlobalDispatcher`: it attaches a
+ * decision to one `llm/stream` call with `AsyncLocalStorage`, and the `fetch`
+ * wrapper it installs is inert for anything without such a decision.
  *
  * Deliberate boundaries:
  *
- *   - The panel is a route of its own (`/model-proxy`), not a Settings page.
- *     `dsh-host-apiproxy` serves settings namespaces from a hard-coded
- *     whitelist, so a third-party namespace answers `settings-not-exposed`.
+ *   - The configuration UI is a **Settings section** (`设置 → 模型代理`, see
+ *     `lib/client.js`). A proxy is ordinary configuration and belongs where
+ *     configuration lives, not on a URL you have to know.
  *   - The plugin never imports `@deepseek-ai/dsh-http-proxy`. That package's
  *     route bookkeeping lives in module-level state, so a second copy would see
- *     a different policy; `globalThis`'s dispatcher symbol is the only state
- *     that crosses copies, and this plugin owns its own.
- *   - A loopback request is always direct. Proxying the harness's own Web UI or
- *     connection transport would form a routing loop.
+ *     a different policy; this plugin owns its own state instead.
+ *   - A model that is not ticked is left alone rather than forced direct. "Left
+ *     alone" means the request keeps the network path it would have had without
+ *     this plugin, including a proxy the launcher installed from the environment.
  */
 
-import { name as pluginName, APPLY_PATH, PANEL_PATH, STATUS_PATH } from './constants.js'
-import { decideRoute, validateConfig, parseNoProxy } from './rules.js'
-import { renderPanel } from './panel.js'
+import { APPLY_PATH, MODELS_PATH, PANEL_PATH, STATUS_PATH, name as pluginName } from './constants.js'
+import { normalizeConfig, toRules, validateUserConfig } from './config.js'
+import { decideRoute } from './rules.js'
 import {
-  applyGlobalPolicy,
-  captureBaseline,
-  describeGlobal,
+  describeActive,
   disposeTransport,
   installFetchWrapper,
   loadTransport,
@@ -49,137 +47,10 @@ export { pluginName as name }
  */
 export const inject = []
 
-/** Roll-up of the last few routing decisions, for the panel. */
+/** Roll-up of the last few routing decisions, for the settings page. */
 const RECENT_LIMIT = 20
 
-/**
- * Copy the entry config into the shape the rest of the plugin uses.
- *
- * Every field is coerced to its exact expected type. `??` alone is not enough:
- * a hand-edited patch can hand back a non-string, and one of those reaching the
- * transport turns a valid setting into a rejected write.
- *
- * @param {unknown} raw the entry config.
- * @returns {object} the resolved config.
- */
-function resolveConfig(raw) {
-  const source = raw !== null && typeof raw === 'object' ? raw : {}
-  const global = source.global !== null && typeof source.global === 'object' ? source.global : {}
-
-  const proxies = {}
-  if (source.proxies !== null && typeof source.proxies === 'object' && !Array.isArray(source.proxies)) {
-    for (const [key, value] of Object.entries(source.proxies)) {
-      if (typeof value === 'string' && value.trim() !== '') proxies[key] = value.trim()
-    }
-  }
-
-  const rules = Array.isArray(source.rules)
-    ? source.rules
-        .filter((rule) => rule !== null && typeof rule === 'object')
-        .map((rule) => {
-          const entry = { proxy: rule.proxy }
-          for (const field of ['provider', 'model', 'host']) {
-            if (typeof rule[field] === 'string' && rule[field].trim() !== '') entry[field] = rule[field].trim()
-          }
-          return entry
-        })
-    : []
-
-  return {
-    global: {
-      mode: typeof global.mode === 'string' ? global.mode.toLowerCase() : 'system',
-      url: typeof global.url === 'string' ? global.url.trim() : '',
-      noProxy: typeof global.noProxy === 'string' ? global.noProxy : '',
-    },
-    proxies,
-    rules,
-    defaultMode: typeof source.defaultMode === 'string' ? source.defaultMode.toLowerCase() : 'system',
-    log: source.log === true,
-  }
-}
-
-/**
- * Read a form body into a config object.
- *
- * The panel sends a plain form; the rules and proxies fields are one entry per
- * line, which is friendlier than JSON and impossible to get subtly wrong with a
- * trailing comma.
- *
- * @param {URLSearchParams} form the submitted fields.
- * @returns {{ config: object, reset: boolean }} the parsed config and whether this was a reset.
- */
-function configFromForm(form) {
-  const reset = form.get('action') === 'reset'
-
-  const proxies = {}
-  for (const line of String(form.get('proxies') ?? '').split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed === '' || trimmed.startsWith('#')) continue
-    const separator = trimmed.indexOf(':')
-    // `http://host:port` has a colon too, so split on the FIRST one and treat
-    // the remainder as the URL; a named entry therefore needs `name: url`.
-    if (separator === -1) continue
-    const key = trimmed.slice(0, separator).trim()
-    const value = trimmed.slice(separator + 1).trim()
-    if (key !== '' && value !== '') proxies[key] = value
-  }
-
-  const rules = []
-  for (const line of String(form.get('rules') ?? '').split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed === '' || trimmed.startsWith('#')) continue
-    const rule = {}
-    // Fields are `key: value` pairs separated by whitespace. A model id or URL
-    // may itself contain a colon, so consume up to the next ` key:` boundary.
-    const pattern = /(provider|model|host|proxy)\s*:\s*([\s\S]*?)(?=\s+(?:provider|model|host|proxy)\s*:|$)/g
-    for (const match of trimmed.matchAll(pattern)) {
-      rule[match[1]] = match[2].trim()
-    }
-    if (Object.keys(rule).length > 0) rules.push(rule)
-  }
-
-  if (reset) {
-    return {
-      reset: true,
-      config: {
-        global: { mode: 'direct', url: '', noProxy: '' },
-        proxies: {},
-        rules: [],
-        defaultMode: 'system',
-        log: false,
-      },
-    }
-  }
-
-  return {
-    reset: false,
-    config: {
-      global: {
-        mode: String(form.get('globalMode') ?? 'system').toLowerCase(),
-        url: String(form.get('globalUrl') ?? '').trim(),
-        noProxy: String(form.get('noProxy') ?? '').trim(),
-      },
-      proxies,
-      rules,
-      defaultMode: String(form.get('defaultMode') ?? 'system').toLowerCase(),
-      log: form.get('log') === 'on',
-    },
-  }
-}
-
 // --- HTTP helpers ------------------------------------------------------------
-
-function sendHtml(res, status, html) {
-  res.writeHead(status, {
-    'content-type': 'text/html; charset=utf-8',
-    'content-length': Buffer.byteLength(html),
-    'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
-    // No scripts at all: every action is a form POST back to this route.
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
-  })
-  res.end(html)
-}
 
 function sendJson(res, status, body) {
   const text = JSON.stringify(body)
@@ -226,6 +97,28 @@ function readBody(req, maxBytes = 65536) {
   })
 }
 
+/**
+ * Read the JSON body the settings page posts.
+ *
+ * The page sends a structure, not a form: the shape is small and typed, so JSON
+ * is the honest encoding and the client needs no encoder at all.
+ *
+ * @param {string} body the raw request body.
+ * @returns {{ config: object }} the submitted config, already normalized.
+ */
+function configFromJson(body) {
+  let parsed
+  try {
+    parsed = JSON.parse(body === '' ? '{}' : body)
+  } catch (error) {
+    throw new Error(`请求不是有效的 JSON：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('请求内容必须是一个对象')
+  }
+  return { config: normalizeConfig(parsed) }
+}
+
 // --- plugin ------------------------------------------------------------------
 
 /**
@@ -234,15 +127,15 @@ function readBody(req, maxBytes = 65536) {
  * @returns {void}
  */
 export function apply(ctx, rawConfig) {
-  let config = resolveConfig(rawConfig)
+  let config = normalizeConfig(rawConfig)
   const recent = []
-  /** Set while a save is in flight, so the panel never reads a half-applied state. */
+  /** Set while a save is in flight, so the page never reads a half-applied state. */
   let applying = false
 
   const transportReady = { ok: false, problems: ['transport not loaded yet'] }
 
   /**
-   * Append one decision to the recent list the panel shows.
+   * Append one decision to the recent list the page shows.
    *
    * @param {string} text the line to keep.
    */
@@ -252,60 +145,71 @@ export function apply(ctx, rawConfig) {
     if (config.log) ctx.logger?.info?.(`model-proxy: ${text}`)
   }
 
+  /** The rules the current config compiles to; recomputed whenever it changes. */
+  let rules = toRules(config)
+
   /**
-   * Apply the global layer and report what happened.
+   * Persist a config through the profile's own editor, so a page write survives
+   * a restart.
    *
-   * @returns {{ ok: boolean, text: string }} the outcome, already user-facing.
+   * `configEditor.edit()` is what the official settings pages use: it validates
+   * the config through the plugin's `internal/config` waterfall, writes the row
+   * into `cordis.patch.yml` atomically, and then lets the Loader reconcile. That
+   * last part means this plugin is reloaded — the in-memory config is replaced by
+   * whatever the Loader reads back, which is the behaviour we want, because the
+   * file is the single source of truth.
+   *
+   * @param {object} next the validated config to write.
+   * @returns {Promise<{ ok: boolean, text: string }>} the outcome, user-facing.
    */
-  const applyGlobal = () => {
-    if (!transportReady.ok) {
-      return { ok: false, text: `代理传输不可用：${transportReady.problems.join('；')}` }
+  const persist = async (next) => {
+    const editor = ctx.get('configEditor')
+    if (editor === undefined || typeof editor.edit !== 'function') {
+      return { ok: false, text: '配置编辑器不可用：改动只在本次运行内生效，重启后会丢失。' }
     }
-    const noProxy = parseNoProxy(config.global.noProxy)
-    // Publish the bypass list for the code paths that read the environment
-    // rather than a policy object, and for spawned children. The dispatcher
-    // itself does not consult it; the route decision does.
-    const result = applyGlobalPolicy({
-      mode: config.global.mode,
-      url: config.global.url,
-      noProxy,
-    })
-    if (!result.ok) return { ok: false, text: `全局代理未应用：${result.reason}` }
-    return { ok: true, text: `全局代理已应用：${result.applied}` }
+    let entry
+    try {
+      const entries = editor.entries()
+      entry = entries.find((candidate) => candidate.options.id === pluginName)
+        ?? entries.find((candidate) => candidate.options.name === 'dsh-model-proxy')
+    } catch (error) {
+      return { ok: false, text: `无法定位本插件的配置条目：${error instanceof Error ? error.message : String(error)}` }
+    }
+    if (entry === undefined) {
+      return { ok: false, text: '没有可写的配置条目：本插件不是以可配置行加载的。' }
+    }
+    try {
+      await editor.edit(entry, () => next)
+      return { ok: true, text: '已保存到配置文件，重启后仍然生效。' }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, text: `写入配置文件失败：${message}` }
+    }
   }
 
   /**
-   * Resolve a request to a routing decision.
+   * Resolve a model request to a routing decision.
    *
    * @param {{ provider?: string, model?: string }} options the waterfall payload.
-   * @param {string | undefined} host the request host, when known.
-   * @returns {object} the decision, plus the label to remember.
+   * @returns {object} the decision.
    */
-  const decide = (options, host) => {
-    const decision = decideRoute({
-      noProxy: parseNoProxy(config.global.noProxy),
-      rules: config.rules,
-      proxies: config.proxies,
-      defaultMode: config.defaultMode,
-      provider: options?.provider,
-      model: options?.model,
-      host,
-    })
+  const decide = (options) => {
+    const decision = decideRoute({ rules, proxies: {}, provider: options?.provider, model: options?.model })
     const detail = decision.kind === 'proxy' ? ` -> ${decision.url}` : ''
-    remember(`${decision.kind}${detail} (${decision.from}) ${options?.model ?? host ?? ''}`.trim())
+    remember(`${decision.kind}${detail} (${decision.from}) ${options?.model ?? ''}`.trim())
     return decision
   }
 
   // --- the waterfall listener ------------------------------------------------
-  // Only `llm/stream` is intercepted. Model discovery (`GET /models`) issues its
-  // fetch inside pi-ai with no provider context, so it can only be matched by a
-  // `host` rule; that is a documented limitation rather than a silent gap.
+  // Only `llm/stream` is intercepted, which is what keeps the plugin's effect
+  // confined to model traffic. A call no rule matches returns the downstream
+  // generator untouched, so it keeps its original network path.
   const disposeStream = ctx.on(
     'llm/stream',
     (options, next) => {
-      const decision = decide(options, undefined)
+      const decision = decide(options)
       const source = next()
-      if (decision.kind === 'inherit') return source
+      if (decision.kind === 'unrouted') return source
 
       // Every `next()` runs inside the ambient route, so the fetch the adapter
       // issues while the generator advances sees this decision and no other.
@@ -336,8 +240,65 @@ export function apply(ctx, rawConfig) {
     return () => dispose()
   }, 'model-proxy: fetch wrapper')
 
-  // --- the panel -------------------------------------------------------------
+  // --- the routes the settings page talks to ---------------------------------
   ctx.inject(['webServer'], (webCtx) => {
+    /**
+     * The models this deployment offers, grouped by provider.
+     *
+     * Read on every request rather than cached: a provider added while the page
+     * is open should show up on the next refresh, and the adapters answer from
+     * their own catalogs, so this costs no network call.
+     *
+     * A provider whose adapter throws is reported with an empty list instead of
+     * failing the whole read — one broken route must not hide the other ten.
+     *
+     * @returns {Promise<Array<{ provider: string, name: string, models: Array<{ id: string, name: string }> }>>}
+     */
+    const listModels = async () => {
+      const llm = webCtx.get('llm')
+      if (llm === undefined || typeof llm.listProviders !== 'function') return []
+
+      let providers = []
+      try {
+        providers = llm.listProviders()
+      } catch {
+        return []
+      }
+
+      const groups = await Promise.all(
+        (Array.isArray(providers) ? providers : []).map(async (provider) => {
+          const id = typeof provider?.id === 'string' ? provider.id : ''
+          if (id === '') return null
+          const name = typeof provider?.name === 'string' && provider.name !== '' ? provider.name : id
+          let models = []
+          if (typeof llm.listModels === 'function') {
+            try {
+              const listed = await llm.listModels(id)
+              models = (Array.isArray(listed) ? listed : [])
+                .map((model) => ({
+                  id: typeof model?.id === 'string' ? model.id : '',
+                  name: typeof model?.name === 'string' && model.name !== '' ? model.name : String(model?.id ?? ''),
+                }))
+                .filter((model) => model.id !== '')
+            } catch {
+              models = []
+            }
+          }
+          return { provider: id, name, models }
+        }),
+      )
+
+      return groups.filter((group) => group !== null)
+    }
+
+    /** A config as the page renders it, plus what it compiles to. */
+    const viewOf = (source = config) => ({
+      proxy: source.proxy,
+      models: source.models,
+      log: source.log,
+      ruleCount: toRules(source).length,
+    })
+
     const handler = async (req, res) => {
       const rejection = fence(webCtx, req)
       if (rejection !== undefined) {
@@ -352,77 +313,71 @@ export function apply(ctx, rawConfig) {
           ok: true,
           transport: transportReady.ok,
           problems: transportReady.problems,
-          global: { ...config.global, active: describeGlobal() },
-          defaultMode: config.defaultMode,
-          proxies: config.proxies,
-          rules: config.rules,
+          active: describeActive(),
           recent,
+          ...viewOf(),
         })
         return
       }
 
+      if (path === MODELS_PATH && req.method === 'GET') {
+        sendJson(res, 200, { ok: true, providers: await listModels() })
+        return
+      }
+
+      // The configuration UI is the Settings section now (`lib/client.js`). The
+      // bare path redirects so an old bookmark still lands somewhere useful
+      // instead of showing a second, divergent form.
       if (path === PANEL_PATH && req.method === 'GET') {
-        sendHtml(res, 200, renderPanel({
-          config,
-          activeGlobal: describeGlobal(),
-          problems: [...transportReady.problems, ...validateConfig(config)],
-          recent,
-          message: null,
-        }))
+        res.writeHead(303, {
+          'cache-control': 'no-store',
+          location: '/',
+          'content-type': 'text/plain; charset=utf-8',
+        })
+        res.end('模型代理由「设置 → 模型代理」配置。\n')
         return
       }
 
       if (path === APPLY_PATH && req.method === 'POST') {
         if (applying) {
-          sendHtml(res, 409, renderPanel({
-            config,
-            activeGlobal: describeGlobal(),
-            problems: [],
-            recent,
-            message: { kind: 'error', text: '另一个保存正在进行，请稍后重试。' },
-          }))
+          sendJson(res, 409, { ok: false, error: 'another save is in progress' })
           return
         }
         applying = true
         try {
-          const body = await readBody(req)
-          const form = new URLSearchParams(body)
-          const parsed = configFromForm(form)
-          const next = resolveConfig(parsed.config)
-          const problems = validateConfig(next)
+          const { config: submitted } = configFromJson(await readBody(req))
+          const problems = validateUserConfig(submitted)
 
           if (problems.length > 0) {
-            sendHtml(res, 400, renderPanel({
-              config: next,
-              activeGlobal: describeGlobal(),
-              problems,
-              recent,
-              message: { kind: 'error', text: '配置未应用，请先修正上面的问题。' },
-            }))
+            sendJson(res, 400, { ok: false, error: problems.join('; '), problems })
             return
           }
 
-          // Only commit once the new config is known to be usable, so a bad
-          // form leaves the running policy exactly as it was.
-          config = next
-          const outcome = applyGlobal()
-          remember(`config saved: global=${config.global.mode} rules=${config.rules.length}`)
-          sendHtml(res, 200, renderPanel({
-            config,
-            activeGlobal: describeGlobal(),
-            problems: [],
-            recent,
-            message: { kind: outcome.ok ? 'ok' : 'error', text: outcome.text },
-          }))
+          // Write first, then adopt: the config editor persists the row and the
+          // Loader reloads this plugin, so committing in memory before the write
+          // could show a state the file does not have.
+          const outcome = await persist(submitted)
+          if (!outcome.ok) {
+            // Still apply for this run — the user changed something and expects
+            // to see it work — but say plainly that it will not survive a restart.
+            config = submitted
+            rules = toRules(config)
+            remember(`config applied in memory only: rules=${String(rules.length)}`)
+          } else {
+            remember(`config saved: rules=${String(toRules(submitted).length)}`)
+          }
+          sendJson(res, outcome.ok ? 202 : 200, {
+            ok: true,
+            persisted: outcome.ok,
+            message: outcome.text,
+            // Report what was submitted, not the state this closure still holds:
+            // a persisted write reloads the plugin, so `config` here is already
+            // stale by the time the response is built.
+            ...viewOf(submitted),
+          })
         } catch (error) {
           const text = error instanceof Error ? error.message : String(error)
-          sendHtml(res, 400, renderPanel({
-            config,
-            activeGlobal: describeGlobal(),
-            problems: [],
-            recent,
-            message: { kind: 'error', text: `保存失败：${text}` },
-          }))
+          sendJson(res, 400, { ok: false, error: text })
         } finally {
           applying = false
         }
@@ -437,6 +392,7 @@ export function apply(ctx, rawConfig) {
         webCtx.webServer.register({ kind: 'exact', path: PANEL_PATH, handler }),
         webCtx.webServer.register({ kind: 'exact', path: APPLY_PATH, handler }),
         webCtx.webServer.register({ kind: 'exact', path: STATUS_PATH, handler }),
+        webCtx.webServer.register({ kind: 'exact', path: MODELS_PATH, handler }),
       ]
       return () => {
         for (const dispose of disposers) dispose()
@@ -445,9 +401,9 @@ export function apply(ctx, rawConfig) {
   })
 
   // --- startup ---------------------------------------------------------------
-  // Loading the transport and installing the first policy wait for boot to
-  // settle: a failed probe must be reported, not thrown, and captureBaseline()
-  // has to observe the launcher's dispatcher before it is replaced.
+  // Loading the transport waits for boot to settle: a failed probe must be
+  // reported, not thrown, so the panel can explain it instead of the plugin
+  // parking the profile.
   ctx.effect(() => {
     let cancelled = false
     void (async () => {
@@ -468,19 +424,15 @@ export function apply(ctx, rawConfig) {
         ctx.logger?.warn?.(`model-proxy: proxy transport unavailable: ${verdict.problems.join('; ')}`)
         return
       }
-
-      captureBaseline()
-      const outcome = applyGlobal()
-      if (outcome.ok) ctx.logger?.info?.(`model-proxy: ${outcome.text}`)
-      else ctx.logger?.warn?.(`model-proxy: ${outcome.text}`)
+      ctx.logger?.info?.(`model-proxy: routing ${String(rules.length)} model(s) for model traffic only`)
     })()
     return () => {
       cancelled = true
     }
   }, 'model-proxy: startup')
 
-  // Restoring the launcher's dispatcher on unload keeps a reload from stranding
-  // the process on a proxy this plugin created.
+  // This plugin never installs a process-wide dispatcher, so teardown only has
+  // to close the connections it opened. The launcher's own path is untouched.
   ctx.effect(() => () => {
     void disposeTransport()
   }, 'model-proxy: teardown')

@@ -1,13 +1,17 @@
 /**
- * Self-tests for `transport.js`: the two claims the plugin rests on.
+ * Self-tests for `transport.js`: the one claim the plugin rests on.
  *
- *   1. The global switch takes effect on the next request and can be reverted,
- *      including back to the launcher's own dispatcher.
- *   2. A route carried through AsyncLocalStorage survives the async-generator
- *      boundary and selects that route's dispatcher, while a request outside any
- *      route keeps using the global one.
+ * **Scope.** The plugin must move model traffic and nothing else. So the tests
+ * prove two things about the fetch wrapper:
  *
- * Both are checked against real HTTP servers on loopback, so a wrong dispatcher
+ *   1. A request with no ambient route is passed through untouched — it never
+ *      consults a proxy this plugin owns, so unrelated traffic (web fetches,
+ *      plugin installs) keeps its original network path.
+ *   2. A request inside an ambient route uses that route's dispatcher, and the
+ *      route survives the async-generator boundary the `llm/stream` wrapper
+ *      relies on, without leaking between concurrent calls.
+ *
+ * Both are checked against real HTTP servers on loopback: a wrong dispatcher
  * shows up as a wrong `VIA-x` body rather than a passing assertion.
  *
  * Run with: node test/transport.test.mjs
@@ -18,10 +22,8 @@ import http from 'node:http'
 
 import { reportSkip, resolveUndici } from './undici.mjs'
 import {
-  applyGlobalPolicy,
-  captureBaseline,
   currentRoute,
-  describeGlobal,
+  describeActive,
   disposeTransport,
   installFetchWrapper,
   loadTransport,
@@ -46,7 +48,7 @@ function startProxy(name) {
   })
 }
 
-/** An unreachable-looking host: every request must go through a proxy to succeed. */
+/** An unroutable host: the request can only succeed if a proxy answers it. */
 const TARGET = 'http://example.invalid/probe'
 
 const failures = []
@@ -80,138 +82,132 @@ proxyPort = first.port
 secondServer = second.server
 secondPort = second.port
 
-captureBaseline()
+// The wrapper is installed once, exactly as `apply()` does it.
+const uninstall = installFetchWrapper()
 
-await test('global proxy applies to plain fetch', async () => {
-  const applied = applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
-  assert.equal(applied.ok, true, applied.reason)
-  const response = await fetch(TARGET)
-  assert.equal(await response.text(), 'VIA-A')
+// --- scope: unrelated traffic is untouched -----------------------------------
+
+await test('a request with no route never touches a proxy this plugin owns', async () => {
+  proxyHits.length = 0
+  // With no ambient route the wrapper delegates to the original fetch, so this
+  // fails to resolve DNS instead of being answered by proxy A.
+  await assert.rejects(() => fetch(TARGET))
+  assert.equal(proxyHits.length, 0, 'no plugin-owned proxy may be contacted')
 })
 
-await test('global proxy can be switched at runtime', async () => {
-  proxyHits.length = 0
-  const applied = applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${secondPort}` })
-  assert.equal(applied.ok, true, applied.reason)
-  const response = await fetch(TARGET)
-  assert.equal(await response.text(), 'VIA-B')
-  assert.equal(proxyHits.filter((hit) => hit.name === 'A').length, 0, 'the old proxy must go unused')
+await test('the route is undefined outside runWithRoute', () => {
+  assert.equal(currentRoute(), undefined)
 })
 
-await test('direct bypasses the global proxy', async () => {
-  proxyHits.length = 0
-  applyGlobalPolicy({ mode: 'direct' })
-  await assert.rejects(() => fetch(TARGET), (error) => {
-    assert.ok(error.cause?.code !== undefined || error.message.length > 0)
-    return true
+await test('an unrouted decision does not create a route', () => {
+  let seen = 'not-run'
+  runWithRoute({ kind: 'unrouted', from: 'no-rule' }, () => {
+    seen = currentRoute()
   })
-  assert.equal(proxyHits.length, 0, 'no proxy may be contacted in direct mode')
+  assert.equal(seen, undefined)
 })
 
-await test('system restores the launcher dispatcher', async () => {
-  applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
-  const applied = applyGlobalPolicy({ mode: 'system' })
-  assert.equal(applied.ok, true, applied.reason)
-  assert.match(describeGlobal(), /system/)
-})
+// --- a routed model call uses its proxy --------------------------------------
 
-await test('an empty proxy URL is refused, not installed', async () => {
-  const applied = applyGlobalPolicy({ mode: 'proxy', url: '   ' })
-  assert.equal(applied.ok, false)
-  assert.match(applied.reason, /empty/)
-})
-
-// --- per-request routing -----------------------------------------------------
-
-const disposeWrapper = installFetchWrapper()
-
-await test('a route selects its own dispatcher over the global one', async () => {
-  applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
-
-  const viaSecond = await runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${secondPort}` }, () => fetch(TARGET))
-  assert.equal(await viaSecond.text(), 'VIA-B', 'the ambient route must win over the global policy')
-})
-
-await test('a direct route bypasses a global proxy', async () => {
-  applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
+await test('a routed request goes through the named proxy', async () => {
   proxyHits.length = 0
-  await assert.rejects(() => runWithRoute({ kind: 'direct' }, () => fetch(TARGET)))
-  assert.equal(proxyHits.length, 0)
-})
-
-await test('no route keeps the global policy', async () => {
-  applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
-  const response = await fetch(TARGET)
+  const response = await runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, () => fetch(TARGET))
   assert.equal(await response.text(), 'VIA-A')
+  assert.equal(proxyHits.length, 1)
 })
 
-await test('concurrent routes do not leak into each other', async () => {
-  applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
+await test('two models can use two different proxies at once', async () => {
+  proxyHits.length = 0
   const [a, b] = await Promise.all([
-    runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10))
-      return (await fetch(TARGET)).text()
-    }),
-    runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${secondPort}` }, async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5))
-      return (await fetch(TARGET)).text()
-    }),
+    runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, () => fetch(TARGET).then((r) => r.text())),
+    runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${secondPort}` }, () => fetch(TARGET).then((r) => r.text())),
   ])
   assert.equal(a, 'VIA-A')
   assert.equal(b, 'VIA-B')
 })
 
-await test('the route survives an async generator boundary', async () => {
-  applyGlobalPolicy({ mode: 'proxy', url: `http://127.0.0.1:${proxyPort}` })
+await test('a concurrent unrouted call is still not proxied', async () => {
+  proxyHits.length = 0
+  const [routed, unrouted] = await Promise.allSettled([
+    runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, () => fetch(TARGET).then((r) => r.text())),
+    fetch(TARGET),
+  ])
+  assert.equal(routed.status, 'fulfilled')
+  assert.equal(routed.value, 'VIA-A')
+  assert.equal(unrouted.status, 'rejected', 'the unrouted call must not borrow the other route')
+})
 
-  // Mirrors what the llm/stream listener does: wrap a generator so each next()
-  // runs inside the route, and the adapter's fetch happens during that next().
-  async function* adapterStream() {
-    yield { type: 'start' }
+await test('direct bypasses even an ambient proxy', async () => {
+  proxyHits.length = 0
+  await assert.rejects(() =>
+    runWithRoute({ kind: 'direct', from: 'rule#1' }, () => fetch(TARGET)),
+  )
+  assert.equal(proxyHits.length, 0, 'direct must not contact a proxy')
+})
+
+// --- the async-generator boundary -------------------------------------------
+
+await test('a route survives an async-generator step', async () => {
+  proxyHits.length = 0
+  // This is the exact shape the `llm/stream` wrapper uses: the adapter's fetch
+  // happens while `next()` runs, which is outside the synchronous call stack
+  // that entered runWithRoute.
+  async function* stream() {
     const response = await fetch(TARGET)
-    yield { type: 'text', text: await response.text() }
-    yield { type: 'finish' }
+    yield await response.text()
   }
 
-  const source = adapterStream()[Symbol.asyncIterator]()
-  const seen = []
-  while (true) {
-    const step = await runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${secondPort}` }, () => source.next())
-    if (step.done === true) break
-    seen.push(step.value)
+  const values = []
+  for await (const value of runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, () => {
+    return (async function* () {
+      const iterator = stream()
+      for (;;) {
+        const step = await runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, () => iterator.next())
+        if (step.done === true) return
+        yield step.value
+      }
+    })()
+  })) {
+    values.push(value)
   }
-  assert.equal(seen[1].text, 'VIA-B', 'a generator step must see the route it runs under')
+
+  assert.deepEqual(values, ['VIA-A'])
 })
 
-await test('currentRoute reports the ambient decision', async () => {
-  assert.equal(currentRoute(), undefined)
-  await runWithRoute({ kind: 'direct' }, () => {
-    assert.deepEqual(currentRoute(), { kind: 'direct' })
-  })
-  await runWithRoute({ kind: 'proxy', url: 'http://p:1' }, () => {
-    assert.deepEqual(currentRoute(), { kind: 'proxy', url: 'http://p:1' })
-  })
+await test('the route does not leak after the generator finishes', async () => {
+  proxyHits.length = 0
+  await assert.rejects(() => fetch(TARGET))
+  assert.equal(proxyHits.length, 0)
 })
 
-await test('the wrapper restores the original fetch on dispose', () => {
-  const before = globalThis.fetch
-  disposeWrapper()
-  // The wrapper was installed once; disposing it must not leave a routed fetch
-  // behind. A second install/dispose pair proves the marker logic is idempotent.
-  const again = installFetchWrapper()
-  again()
-  assert.equal(typeof globalThis.fetch, 'function')
-  assert.notEqual(globalThis.fetch, before, 'fetch is expected to be a different function after a fresh install/dispose cycle')
+// --- teardown ----------------------------------------------------------------
+
+await test('describeActive reports the proxies it opened', () => {
+  assert.match(describeActive(), /127\.0\.0\.1/)
 })
 
-await disposeTransport()
+await test('uninstalling the wrapper restores the original fetch', async () => {
+  uninstall()
+  proxyHits.length = 0
+  await assert.rejects(() => runWithRoute({ kind: 'proxy', url: `http://127.0.0.1:${proxyPort}` }, () => fetch(TARGET)))
+  assert.equal(proxyHits.length, 0)
+  // Reinstall so the final dispose has work to do.
+  installFetchWrapper()
+})
+
+await test('disposeTransport closes its dispatchers', async () => {
+  await disposeTransport()
+  assert.equal(describeActive(), '尚未建立代理连接')
+})
+
+// --- summary -----------------------------------------------------------------
 
 proxyServer.close()
 secondServer.close()
 
 if (failures.length > 0) {
-  console.error(`\n${failures.length} failed, ${passed} passed\n`)
-  for (const failure of failures) console.error(`  ✗ ${failure}`)
+  console.error(`${failures.length} failed, ${passed} passed`)
+  for (const failure of failures) console.error(`  ${failure}`)
   process.exitCode = 1
 } else {
   console.log(`${passed} passed`)

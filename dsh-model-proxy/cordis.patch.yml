@@ -1,23 +1,10 @@
-# dsh-model-proxy bundle layer: one Host row.
-# `config` is spelled out so the plugin always receives a concrete object even
-# before the first panel write; the values match this plugin's own defaults.
 - insert:
     - id: model-proxy
       name: dsh-model-proxy
       config:
-        # Global layer: 'system' leaves the launcher's own HTTP(S)_PROXY policy
-        # alone, 'direct' forces a bypass, 'proxy' installs `url`.
-        global:
-          mode: system
-          url: ''
-          noProxy: ''
-        # Named proxies, referenced by `proxy` in a rule below.
-        proxies: {}
-        # Per-model / per-host rules, first match wins. `provider` and `model`
-        # need the llm/stream waterfall; `url` also matches model discovery and
-        # any other fetch that leaves no model context.
-        rules: []
-        # Applied when nothing matched. 'system' keeps the global layer.
-        defaultMode: system
-        # Log one line per outgoing request decision.
+        # The proxy every routed model goes through. Empty means route nothing.
+        proxy: ''
+        # The models that go through it. Every other model keeps its own path.
+        models: []
+        # Log one line per routing decision.
         log: false
