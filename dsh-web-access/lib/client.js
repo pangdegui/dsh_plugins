@@ -566,7 +566,7 @@ window.__ModuleLoader__.load({
               h('span', { key: 'v2' }, show(status?.port)),
               h('span', { key: 'k6', style: keyStyle }, t('lanEndpoint')),
               h('span', { key: 'v6' }, status?.lan?.listening
-                ? `http://${status.lan.address}:${status.lan.port}`
+                ? `http://${status.lan.address}:${status.lan.port} · 127.0.0.1:${status.lan.port}`
                 : t('lanOff')),
               h('span', { key: 'k3', style: keyStyle }, t('liveTrust')),
               h('span', { key: 'v3' }, show(status?.trustLive)),

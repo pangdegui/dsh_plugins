@@ -166,7 +166,7 @@ const MANAGED_END = '# <<< dsh-web-access managed rows <<<'
 let lastManaged = { path: null, changed: false, at: 0, error: null }
 
 /** The LAN-facing proxy: bound to one concrete LAN address, never to 0.0.0.0. */
-const proxyState = { server: null, host: null, port: null, upstream: null, listening: false, error: null }
+const proxyState = { servers: [], host: null, port: null, upstream: null, listening: false, error: null }
 
 /** This machine's non-internal IPv4 addresses, the same set upstream derives. */
 function localIpv4Addresses() {
@@ -326,15 +326,31 @@ function forwardUpgrade(req, socket, head, port) {
   socket.on('error', () => upstream.destroy())
 }
 
-/** Start (or keep) the LAN listener; never throws and never blocks startup. */
+/** One proxy listener; the handler is shared by every bound address. */
+function createProxyListener(upstreamPort) {
+  const server = http.createServer((req, res) => forwardHttp(req, res, upstreamPort))
+  server.on('upgrade', (req, socket, head) => forwardUpgrade(req, socket, head, upstreamPort))
+  server.on('clientError', (_error, socket) => {
+    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+  })
+  return server
+}
+
+/**
+ * Start (or keep) the LAN listener; never throws and never blocks startup.
+ *
+ * The fixed port is served on the LAN address *and* on 127.0.0.1: the loopback
+ * copy makes the same stable URL work on this machine (and through a
+ * port-forwarder that targets loopback), while the LAN copy is what another
+ * device reaches.
+ */
 function startProxy(ctx, config) {
   if (config.bind === '127.0.0.1') {
     stopProxy()
     return
   }
   // The application's own loopback port stays launch-assigned (the desktop
-  // window follows it); only the LAN-facing port is fixed and configurable, so
-  // a machine-local URL never changes between restarts.
+  // window follows it); only this proxy port is fixed and configurable.
   const upstreamPort = ctx.get('webServer')?.port
   const listenPort = Number.isInteger(config.lanPort) && config.lanPort > 0 ? config.lanPort : DEFAULT_LAN_PORT
   const host = pickLanAddress(config)
@@ -344,50 +360,57 @@ function startProxy(ctx, config) {
       : 'this machine has no LAN IPv4 address'
     return
   }
-  if (proxyState.server !== null && proxyState.host === host && proxyState.port === listenPort && proxyState.upstream === upstreamPort) return
+  const addresses = [...new Set([host, '127.0.0.1'])]
+  if (
+    proxyState.servers.length > 0
+    && proxyState.host === host
+    && proxyState.port === listenPort
+    && proxyState.upstream === upstreamPort
+  ) return
   stopProxy()
-  const server = http.createServer((req, res) => forwardHttp(req, res, upstreamPort))
-  server.on('upgrade', (req, socket, head) => forwardUpgrade(req, socket, head, upstreamPort))
-  server.on('clientError', (_error, socket) => {
-    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
-  })
-  server.once('error', (error) => {
-    proxyState.server = null
-    proxyState.host = null
-    proxyState.port = null
-    proxyState.upstream = null
-    proxyState.listening = false
-    proxyState.error = String(error.message ?? error)
-    ctx.logger?.warn?.('web-access: LAN proxy could not listen on %s:%s: %s', host, listenPort, proxyState.error)
-  })
-  server.once('listening', () => {
-    proxyState.listening = true
-    proxyState.error = null
-    ctx.logger?.info?.('web-access: LAN proxy listening on http://%s:%s', host, listenPort)
-  })
-  proxyState.server = server
   proxyState.host = host
   proxyState.port = listenPort
   proxyState.upstream = upstreamPort
   proxyState.listening = false
   proxyState.error = null
-  server.listen(listenPort, host)
+  let pending = addresses.length
+  let lastError = null
+  let listening = 0
+  const settle = () => {
+    pending -= 1
+    if (pending > 0) return
+    proxyState.listening = listening > 0
+    proxyState.error = listening > 0 ? null : (lastError ?? 'no address could be bound')
+    if (listening > 0) {
+      ctx.logger?.info?.('web-access: LAN proxy listening on http://%s:%s (and 127.0.0.1:%s)', host, listenPort, listenPort)
+    } else {
+      ctx.logger?.warn?.('web-access: LAN proxy could not listen on %s:%s: %s', host, listenPort, proxyState.error)
+    }
+  }
+  for (const address of addresses) {
+    const server = createProxyListener(upstreamPort)
+    server.once('listening', () => { listening += 1; settle() })
+    server.once('error', (error) => { lastError = String(error.message ?? error); settle() })
+    proxyState.servers.push(server)
+    server.listen(listenPort, address)
+  }
 }
 
-/** Close the LAN listener, if one is open. */
+/** Close every proxy listener, if any are open. */
 function stopProxy() {
-  const server = proxyState.server
-  proxyState.server = null
+  const servers = proxyState.servers
+  proxyState.servers = []
   proxyState.host = null
   proxyState.port = null
   proxyState.upstream = null
   proxyState.listening = false
-  if (server === null) return
-  try {
-    server.closeAllConnections?.()
-    server.close()
-  } catch {
-    // closing an already-closed server is not worth surfacing
+  for (const server of servers) {
+    try {
+      server.closeAllConnections?.()
+      server.close()
+    } catch {
+      // closing an already-closed server is not worth surfacing
+    }
   }
 }
 

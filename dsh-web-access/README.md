@@ -62,6 +62,7 @@ off. Treat such a URL as a password: it grants full access to this Harness.
 
 ```
 另一台设备 ──▶ http://<lanAddress>:<lanPort>   (插件内的反向代理,固定端口,默认 3080)
+本机 / 转发  ──▶ http://127.0.0.1:<lanPort>      (同一端口也绑回环,方便本机与端口转发)
                      │  转发 Host 原样保留
                      ▼
               http://127.0.0.1:<appPort>        (应用自己的监听器,启动时分配,从未改动)
