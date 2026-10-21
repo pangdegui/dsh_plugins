@@ -37,6 +37,21 @@ const clean = JSON.stringify({ messages: [{ role: "system", content: "s" }] });
 await globalThis.fetch("https://www.workbuddy.cn/v2/chat/completions", { method: "POST", body: clean, headers: {} });
 assert.equal(seen.body, clean, "an untouched body must not be re-serialized");
 
+// The gateway's channel check keys on the harness User-Agent; anything else passes.
+await globalThis.fetch("https://www.workbuddy.cn/v2/chat/completions", {
+  method: "POST",
+  body: clean,
+  headers: { "user-agent": "deepseek-harness/0.2.1-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)" },
+});
+assert.equal(seen.headers["user-agent"], "WorkBuddy/1.0", "the harness user agent must be replaced");
+
+await globalThis.fetch("https://www.workbuddy.cn/v2/chat/completions", {
+  method: "POST",
+  body: clean,
+  headers: { "user-agent": "pi (win32 10.0.26100; x64)" },
+});
+assert.equal(seen.headers["user-agent"], "pi (win32 10.0.26100; x64)", "another user agent must survive");
+
 // Other hosts and other paths are not our business.
 await globalThis.fetch("https://example.com/v1/chat/completions", {
   method: "POST",

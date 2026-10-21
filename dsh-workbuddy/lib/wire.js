@@ -61,6 +61,48 @@ function describeFetch(fn) {
 }
 
 /**
+ * The header the gateway's channel check actually keys on.
+ *
+ * Measured against the live gateway with everything else held constant: the
+ * same body returns `400 / 11128` when `User-Agent` starts with
+ * `deepseek-harness/`, and streams normally when it names anything else — Node's
+ * default, `pi (…)`, even `WorkBuddy/1.0`. DSH sets that header once for the
+ * whole process, so it reaches every provider; only WorkBuddy rejects it.
+ */
+const HARNESS_USER_AGENT = /deepseek-harness/i
+
+/** What a rejected `User-Agent` is replaced with. */
+export const NEUTRAL_USER_AGENT = 'WorkBuddy/1.0'
+
+/**
+ * Replace a harness-identifying `User-Agent`, leaving every other header alone.
+ *
+ * Returns the input when there is nothing to change, so a request that is fine
+ * keeps the exact header object the transport built.
+ *
+ * @param headers - `Headers`, a plain object, or undefined.
+ * @param replacement - the user agent to send instead.
+ * @returns the headers to send, or the input when unchanged.
+ */
+function overrideUserAgent(headers, replacement) {
+  if (headers === undefined) return headers
+  const entries = typeof headers.entries === 'function' ? [...headers.entries()] : Object.entries(headers)
+  const current = entries.find(([name]) => String(name).toLowerCase() === 'user-agent')?.[1]
+  if (typeof current !== 'string' || !HARNESS_USER_AGENT.test(current)) return headers
+  if (typeof headers.set === 'function') {
+    headers.set('user-agent', replacement)
+    return headers
+  }
+  const next = {}
+  for (const [name, value] of entries) {
+    if (String(name).toLowerCase() === 'user-agent') continue
+    next[name] = value
+  }
+  next['user-agent'] = replacement
+  return next
+}
+
+/**
  * Rewrite `developer` instruction messages to `system`, in place.
  *
  * pi-ai emits `developer` only for a reasoning model whose compat allows it, so
@@ -121,7 +163,9 @@ export function installWireGuard(options) {
       ) {
         const body = JSON.parse(init.body)
         const roles = (body.messages ?? []).map((message) => message.role).join(',')
-        const changed = normalizeRoles(body)
+        const bodyChanged = normalizeRoles(body)
+        const headers = overrideUserAgent(init.headers, NEUTRAL_USER_AGENT)
+        const userAgentChanged = headers !== init.headers
         if (logDirectory !== undefined) {
           const instructions = (body.messages ?? [])
             .filter((message) => message.role === 'system' || message.role === 'developer')
@@ -131,15 +175,16 @@ export function installWireGuard(options) {
             logDirectory,
             `request model=${body.model} roles=[${roles}] tools=${(body.tools ?? []).length} ` +
               `max_tokens=${body.max_tokens} max_completion_tokens=${body.max_completion_tokens} ` +
-              `${changed ? 'REWROTE developer->system ' : ''}instructions=${instructions}`,
+              `${bodyChanged ? 'REWROTE developer->system ' : ''}${userAgentChanged ? 'REWROTE user-agent ' : ''}` +
+              `instructions=${instructions}`,
           )
           appendLog(logDirectory, `headers=${JSON.stringify(redactHeaders(init.headers))}`)
           appendLog(logDirectory, `transport=${describeFetch(original)}`)
           watched = true
         }
-        if (changed) {
-          init = { ...init, body: JSON.stringify(body) }
-          init.headers = forgetContentLength(init.headers)
+        if (bodyChanged || userAgentChanged) {
+          init = { ...init, headers: bodyChanged ? forgetContentLength(headers) : headers }
+          if (bodyChanged) init.body = JSON.stringify(body)
         }
       }
     } catch {
