@@ -97,15 +97,24 @@ DeepSeek、MiniMax、Hunyuan 等），略去图片/视频/补全等非聊天路�
 - **提示词校验**：网关会拒绝以 DSH 身份句（`You are an AI agent powered by
   DeepSeek Harness.`）开头的 `system` 消息，返回 `400` 与业务码 `11128
   Illegal API invocation from an unapproved channel`。它是内容级的：这句话放在
-  提示词后面、换一个 role、或在前面加一行普通文本都不触发；请求头、签名和
+  提示词后面、或作为用户消息内容都不触发；请求头、签名和
   token scope 都不参与判断。插件的「提示词守卫」就是为这一条准备的。
+- **角色校验**：网关同样拒绝 `role: "developer"` 的指令消息，返回同一个
+  `11128`。pi-ai 只在「模型是推理模型 + compat 允许」时才把指令消息发成
+  `developer`，所以插件在 provider 行里钉死
+  `compat: { supportsDeveloperRole: false }`，让提示词始终以 `system` 发出。
+  这两条是**独立**的：改了提示词开头仍然会踩到 role 这一条，反之亦然。
 
 ## 提示词守卫（11128）
 
-WorkBuddy 的模型网关会做一次"渠道校验"，判断依据是系统提示词的**开头**。DSH
-默认的第一段正好是身份句，于是默认配置下每个请求都会 400。
+WorkBuddy 的模型网关会做一次"渠道校验"，对两种请求返回 `400 / 11128`：
 
-**设置 → WorkBuddy → 提示词守卫** 提供三种处理方式：
+1. 系统提示词的**开头**是 DSH 的身份句；
+2. 指令消息用了 `developer` 角色（pi-ai 对推理模型会优先用它）。
+
+第 2 条由 provider 行里的 `compat: { supportsDeveloperRole: false }` 永久修掉，
+不需要用户配置。第 1 条取决于提示词内容，**设置 → WorkBuddy → 提示词守卫**
+提供三种处理方式：
 
 | 方式 | 发出去的系统提示词 |
 |---|---|
@@ -125,6 +134,20 @@ WorkBuddy 的模型网关会做一次"渠道校验"，判断依据是系统提�
     promptGuard: prepend            # off | prepend | strip
     promptPrefix: This session is served through WorkBuddy.
 ```
+
+插件写进 `llm-pi-ai` 的那条路由同时带有角色开关：
+
+```yaml
+providers:
+  workbuddy:
+    api: openai-completions
+    baseURL: https://www.workbuddy.cn/v2
+    compat:
+      supportsDeveloperRole: false   # 否则推理模型会被发成 developer 角色
+```
+
+已有路由默认不会被插件改写（`syncProviderModels: false`），从旧版本升级时请
+手工补上 `compat`，或删掉该路由后重启让插件重写。
 
 `POST /workbuddy/prompt`（`{ "mode": "prepend", "prefix": "..." }`）是页面用的保存
 接口；没有 `configEditor` 时改动仍然对本次运行生效，只是重启后丢失。
@@ -159,7 +182,7 @@ node test/client.test.mjs    # 配置页：注册、字典、样式表与初始�
 |---|---|
 | 模型列表没有 `WorkBuddy` | profile 未加入 bundle，或没有 `llm-pi-ai` 行；看 DSH 日志里 `workbuddy:` 开头的告警。 |
 | 请求报 `MISSING_CREDENTIAL` | 未登录或凭据被清掉；打开 **设置 → WorkBuddy** 重新登录。 |
-| 请求报 `400 / 11128` | 网关拒绝了以 DSH 身份句开头的系统提示词；把 **设置 → WorkBuddy → 提示词守卫** 设为「在开头增加一句」或「删除身份行」。 |
+| 请求报 `400 / 11128` | 两个独立原因：① 提示词以 DSH 身份句开头 → 把 **设置 → WorkBuddy → 提示词守卫** 设为「在开头增加一句」或「删除身份行」；② 指令消息是 `developer` 角色 → 确认 `workbuddy` 路由带 `compat: { supportsDeveloperRole: false }`。 |
 | 请求 401/403 | token 被服务端吊销；重新登录。 |
 | 登录页打不开 | 需要能访问 `www.workbuddy.cn`；也支持 `endpoint: https://staging.workbuddy.cn`。 |
 | 刷新一直失败 | refresh token 过期（通常远长于 access token）；重新登录即可。 |

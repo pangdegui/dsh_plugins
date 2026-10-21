@@ -35,6 +35,9 @@ const config = { endpoint: 'https://www.workbuddy.cn/', displayName: 'WorkBuddy'
 const provider = providerConfig(config)
 assert.equal(provider.api, 'openai-completions')
 assert.equal(provider.baseURL, 'https://www.workbuddy.cn/v2')
+// The gateway rejects the `developer` role with 11128, so the route must never
+// let pi-ai choose it, whatever the model's reasoning capability.
+assert.deepEqual(provider.compat, { supportsDeveloperRole: false })
 assert.equal(provider.apiKeyEnv, 'WORKBUDDY_ACCESS_TOKEN')
 assert.equal(provider.displayName, 'WorkBuddy')
 assert.equal(provider.models.length, WORKBUDDY_MODELS.length)

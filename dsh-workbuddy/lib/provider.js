@@ -21,6 +21,13 @@ export function providerConfig(config) {
     apiKeyEnv: config.credentialRef,
     api: 'openai-completions',
     baseURL: `${config.endpoint.replace(/\/+$/, '')}/v2`,
+    // The gateway answers 11128 to the OpenAI `developer` role, and pi-ai emits
+    // that role instead of `system` whenever the model is a reasoning model and
+    // this compat switch allows it. Measured against the live gateway: the same
+    // body with `role: "system"` streams, with `role: "developer"` returns
+    // `400 {"code":11128}`. Pinning the switch keeps every prompt — reasoning
+    // model or not — on the role the gateway accepts.
+    compat: { supportsDeveloperRole: false },
     models: WORKBUDDY_MODELS.map((model) => ({
       id: model.id,
       name: model.name,
