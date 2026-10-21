@@ -42,6 +42,24 @@ function describeInstruction(message) {
   return `${message.role}:${JSON.stringify(text.slice(0, 60))}`
 }
 
+/** Headers as a plain object, with the bearer token and cookies removed. */
+function redactHeaders(headers) {
+  const result = {}
+  if (headers === undefined) return result
+  const entries = typeof headers.entries === 'function' ? [...headers.entries()] : Object.entries(headers)
+  for (const [name, value] of entries) {
+    const lower = String(name).toLowerCase()
+    result[name] = lower === 'authorization' || lower === 'cookie' ? '<redacted>' : String(value)
+  }
+  return result
+}
+
+/** A one-word description of the fetch implementation in use, for the log. */
+function describeFetch(fn) {
+  const source = typeof fn === 'function' ? Function.prototype.toString.call(fn).slice(0, 120) : 'none'
+  return JSON.stringify(source)
+}
+
 /**
  * Rewrite `developer` instruction messages to `system`, in place.
  *
@@ -91,6 +109,7 @@ export function installWireGuard(options) {
   if (typeof original !== 'function' || original[MARKER] === true) return () => {}
 
   const wrapper = async (input, init) => {
+    let watched = false
     try {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input?.url
       if (
@@ -114,6 +133,9 @@ export function installWireGuard(options) {
               `max_tokens=${body.max_tokens} max_completion_tokens=${body.max_completion_tokens} ` +
               `${changed ? 'REWROTE developer->system ' : ''}instructions=${instructions}`,
           )
+          appendLog(logDirectory, `headers=${JSON.stringify(redactHeaders(init.headers))}`)
+          appendLog(logDirectory, `transport=${describeFetch(original)}`)
+          watched = true
         }
         if (changed) {
           init = { ...init, body: JSON.stringify(body) }
@@ -123,7 +145,16 @@ export function installWireGuard(options) {
     } catch {
       /* an unexpected body shape is forwarded untouched */
     }
-    return original(input, init)
+    const response = await original(input, init)
+    if (watched && response.status >= 400) {
+      try {
+        const text = await response.clone().text()
+        appendLog(logDirectory, `response status=${response.status} body=${JSON.stringify(text.slice(0, 600))}`)
+      } catch {
+        /* a body that cannot be read is not worth a second failure */
+      }
+    }
+    return response
   }
   wrapper[MARKER] = true
   globalThis.fetch = wrapper
