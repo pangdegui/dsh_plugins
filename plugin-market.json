@@ -82,7 +82,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "commit": "72caaef370f7db1d8afaa70de15e51edc9c276d4",
             "path": "dsh-model-proxy"
           }
         }
@@ -124,7 +124,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "commit": "72caaef370f7db1d8afaa70de15e51edc9c276d4",
             "path": "dsh-session-delete"
           }
         }
@@ -167,7 +167,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "commit": "72caaef370f7db1d8afaa70de15e51edc9c276d4",
             "path": "dsh-web-access"
           }
         }
@@ -180,8 +180,8 @@
         "zh": "WorkBuddy 模型"
       },
       "description": {
-        "en": "Sign in to WorkBuddy with a QR code or browser link and use its chat models from DSH. Rotates tokens automatically and installs the model route for you.",
-        "zh": "用二维码或浏览器链接登录 WorkBuddy，在 DSH 里直接使用它的聊天模型；自动续期 token，并自动装好模型路由。"
+        "en": "Sign in to WorkBuddy with a QR code or browser link and use its chat models from DSH. Rotates tokens automatically, installs the model route for you, and adapts the prompt so the gateway's channel check stops rejecting requests.",
+        "zh": "用二维码或浏览器链接登录 WorkBuddy，在 DSH 里直接使用它的聊天模型；自动续期 token、自动装好模型路由，并处理网关的渠道校验（11128）。"
       },
       "icon": "dsh-workbuddy/icon.svg",
       "author": "pangdegui",
@@ -205,12 +205,12 @@
       },
       "versions": [
         {
-          "version": "0.2.0",
-          "publishTimestamp": 1792549677,
+          "version": "0.3.0",
+          "publishTimestamp": 1792559968,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "commit": "72caaef370f7db1d8afaa70de15e51edc9c276d4",
             "path": "dsh-workbuddy"
           }
         }
