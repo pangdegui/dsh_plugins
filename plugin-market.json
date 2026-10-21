@@ -82,7 +82,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "53b7a1cd8bb8f373f7bbf1d013103a53e38ee4f0",
+            "commit": "4d7e6724f180f517dbcf0e0649c16c7d8ec43277",
             "path": "dsh-model-proxy"
           }
         }
@@ -124,7 +124,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "53b7a1cd8bb8f373f7bbf1d013103a53e38ee4f0",
+            "commit": "4d7e6724f180f517dbcf0e0649c16c7d8ec43277",
             "path": "dsh-session-delete"
           }
         }
@@ -167,7 +167,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "53b7a1cd8bb8f373f7bbf1d013103a53e38ee4f0",
+            "commit": "4d7e6724f180f517dbcf0e0649c16c7d8ec43277",
             "path": "dsh-web-access"
           }
         }
@@ -205,12 +205,12 @@
       },
       "versions": [
         {
-          "version": "0.3.3",
-          "publishTimestamp": 1792573150,
+          "version": "0.4.0",
+          "publishTimestamp": 1792574350,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "53b7a1cd8bb8f373f7bbf1d013103a53e38ee4f0",
+            "commit": "4d7e6724f180f517dbcf0e0649c16c7d8ec43277",
             "path": "dsh-workbuddy"
           }
         }
