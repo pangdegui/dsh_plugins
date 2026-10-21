@@ -49,7 +49,7 @@ import {
 } from './prompt-guard.js'
 import { needsRefresh, providerConfig } from './provider.js'
 import { ANONYMOUS_HEADERS, WorkBuddyClient, normalizeToken } from './wb.js'
-import { installWireGuard } from './wire.js'
+import { installWireGuard, DEFAULT_APP_VERSION } from './wire.js'
 import { renderSVG } from './uqr.js'
 
 export const name = 'workbuddy'
@@ -92,6 +92,18 @@ export const Config = z.object({
   promptGuard: z.union([z.const('off'), z.const('prepend'), z.const('strip')]).default('prepend'),
   /** One line inserted at the very start of the prompt when `promptGuard` is `prepend`. */
   promptPrefix: z.string().default(DEFAULT_PROMPT_PREFIX),
+  /**
+   * Send the official client's gateway header set instead of the harness's.
+   *
+   * The gateway's channel check keys on the `User-Agent` DSH sets process-wide
+   * (`deepseek-harness/…`) and answers `11128` for it. With this on, outbound
+   * chat requests carry the same headers the WorkBuddy desktop client stamps
+   * (`X-IDE-*`, `x-codebuddy-request`, trace ids, a `WorkBuddy/<version>` UA).
+   * Turn it off only to compare behaviour against a plain transport.
+   */
+  gatewayHeaders: z.boolean().default(true),
+  /** Version reported in `X-IDE-Version` and the `User-Agent` when aligning. */
+  appVersion: z.string().default(DEFAULT_APP_VERSION),
 })
 
 const ROUTE_BASE = '/workbuddy'
@@ -297,6 +309,8 @@ async function persistPromptGuard(ctx, config, next) {
     refreshSkewMs: config.refreshSkewMs,
     promptGuard: next.mode,
     promptPrefix: next.prefix,
+    gatewayHeaders: config.gatewayHeaders,
+    appVersion: config.appVersion,
   }
   try {
     await editor.edit(entry, () => row)
@@ -664,21 +678,26 @@ export function apply(ctx, config) {
     refreshSkewMs: Number.isFinite(config?.refreshSkewMs) ? Math.max(0, config.refreshSkewMs) : 10 * 60_000,
     promptGuard: normalizePromptGuard(config?.promptGuard, 'prepend'),
     promptPrefix: normalizePromptPrefix(config?.promptPrefix),
+    gatewayHeaders: config?.gatewayHeaders !== false,
+    appVersion:
+      typeof config?.appVersion === 'string' && config.appVersion.trim() !== '' ? config.appVersion.trim() : DEFAULT_APP_VERSION,
   }
   const client = new WorkBuddyClient({ endpoint: resolved.endpoint })
   const loaded = loadSession(ctx.logger)
   const state = { session: loaded?.endpoint === resolved.endpoint ? loaded : undefined }
 
-  // The gateway rejects the `developer` instruction role with 11128, and the
-  // route's compat switch is only one layer of defence: this wrapper normalizes
-  // the role on the wire, for every request this process sends to the endpoint.
-  // It also records what was sent, since the gateway's block looks the same
+  // The gateway's channel check keys on the User-Agent DSH sets process-wide,
+  // and it rejects the `developer` instruction role as well. Both are fixed on
+  // the wire here, for every request this process sends to the endpoint, and the
+  // same wrapper records what was sent: the gateway's block looks identical
   // whichever reason triggered it.
   ctx.effect(
     () =>
       installWireGuard({
         endpoint: resolved.endpoint,
         logDirectory: path.join(dshHome(), 'workbuddy'),
+        alignHeaders: resolved.gatewayHeaders,
+        appVersion: resolved.appVersion,
       }),
     'workbuddy: wire guard',
   )

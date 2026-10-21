@@ -106,6 +106,14 @@ DeepSeek、MiniMax、Hunyuan 等），略去图片/视频/补全等非聊天路�
   `User-Agent: deepseek-harness/<version> (+https://github.com/deepseek-ai/deepseek-harness)`，
   网关对带这个头的请求直接回 `11128 request illegal`。实测把同一份请求体的
   UA 换成 Node 默认、`pi (…)` 或 `WorkBuddy/1.0` 都能正常流式返回。
+- **官方客户端的整套头**：官方桌面端在把请求转给网关前会重写一套头（其 bundle
+  里的 `applyGatewayHeaders` / `applyTraceHeaders`）：`X-IDE-Type` /
+  `X-IDE-Name=WorkBuddy`、`X-IDE-Version`、`X-Product=SaaS`、`X-Private-Data=true`、
+  `x-codebuddy-request=1`、`X-Agent-Intent=craft`、`X-Agent-Purpose=conversation`、
+  `x-requested-with=XMLHttpRequest`、`Accept-Encoding=identity`、
+  `X-Request-ID` / `X-Conversation-ID` 等 UUID，外加 `traceparent`、`b3`、`X-B3-*`
+  追踪头，UA 是 `WorkBuddy/<version> WorkBuddy/<version>`。插件默认就发这一套
+  （`gatewayHeaders: true`），并顺手去掉 `x-stainless-*` 这类 SDK 指纹。
 - 这三条是**独立**的：只改提示词开头仍然会踩到角色和 UA，只改 UA 也仍然会踩到
   提示词。插件的出站守卫（`lib/wire.js`）负责后两条，提示词守卫负责第一条。
 
@@ -119,7 +127,8 @@ WorkBuddy 的模型网关会做一次"渠道校验"，对三种请求返回 `400
 
 第 2、3 条由插件的**出站守卫**（`lib/wire.js`）在 `globalThis.fetch` 上修掉：
 发往本插件端点的 `/v2/chat/completions` 请求，`developer` 角色改写成 `system`，
-harness 的 UA 换成 `WorkBuddy/1.0`，两者都在离开进程前完成。provider 行里的
+请求头整体换成官方客户端那一套（UA `WorkBuddy/<appVersion> …`，去掉
+`x-stainless-*` 与 harness 归因头），都在离开进程前完成。provider 行里的
 `compat: { supportsDeveloperRole: false }` 仍然保留，作为不依赖 wire 层的第二道
 保险。每个被检查的请求会往 `$DSH_HOME/workbuddy/wire.log` 记下角色、工具数、
 token 上限、请求头和每条指令消息的开头 60 字（token 打码），失败时还会记下
@@ -144,6 +153,8 @@ token 上限、请求头和每条指令消息的开头 60 字（token 打码）�
   config:
     promptGuard: prepend            # off | prepend | strip
     promptPrefix: This session is served through WorkBuddy.
+    gatewayHeaders: true            # 发官方客户端那套请求头（默认开）
+    appVersion: 1.0.0               # 写进 X-IDE-Version 和 UA 的版本号
 ```
 
 插件写进 `llm-pi-ai` 的那条路由同时带有角色开关：
