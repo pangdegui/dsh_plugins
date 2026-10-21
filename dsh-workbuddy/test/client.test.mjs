@@ -128,7 +128,7 @@ await test('zh and en define the same keys', () => {
   const en = Object.keys(table.en ?? {}).sort()
   assert.ok(zh.length > 0, 'the zh table must not be empty')
   assert.deepEqual(en, zh, 'a key missing from one language falls back to the raw key')
-  for (const key of ['login', 'logout', 'loginTitle', 'loginWaiting', 'qrAlt', 'loadFailed']) {
+  for (const key of ['login', 'logout', 'loginTitle', 'loginWaiting', 'qrAlt', 'loadFailed', 'guardMode', 'guardModePrepend', 'guardSave']) {
     assert.ok(zh.includes(key), `dictionary must carry ${key}`)
   }
 })
@@ -156,6 +156,8 @@ await test('owns one stylesheet, removed by its disposer', () => {
     const css = inserted[0].textContent
     assert.ok(css.includes('.wb_'), 'every rule stays under the plugin prefix')
     assert.ok(css.includes('--dsw-alias-border-l1'), 'borders use the current token')
+    assert.ok(css.includes('.wb_select'), 'the guard select is styled')
+    assert.ok(css.includes('.wb_input'), 'the prefix field is styled')
     assert.ok(!css.includes('--dsw-alias-line-'), 'removed line tokens must not come back')
     for (const dispose of disposers) dispose()
     assert.equal(removed.length, 1, 'unloading removes the sheet')
@@ -219,6 +221,16 @@ await test('the page exposes a login action and the model route summary', () => 
   assert.ok(text.includes('登录 / 重新登录'))
   assert.ok(text.includes('模型路由'))
   assert.ok(text.includes('Provider'))
+})
+
+await test('the page exposes the prompt guard with both rewrite modes', () => {
+  const { sections } = applyWithFakes()
+  const text = textOf(sections[0].component({ t: sections[0].t }))
+  assert.ok(text.includes('提示词守卫'), 'the guard has its own section')
+  assert.ok(text.includes('在开头增加一句'), 'prepend is offered')
+  assert.ok(text.includes('删除身份行'), 'strip is offered')
+  assert.ok(text.includes('关闭'), 'the guard can be turned off')
+  assert.ok(text.includes('保存'), 'the guard is saved explicitly')
 })
 
 // --- summary -----------------------------------------------------------------

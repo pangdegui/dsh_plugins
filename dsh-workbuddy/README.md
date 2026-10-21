@@ -69,7 +69,8 @@ Host 每 1.5 秒轮询一次 WorkBuddy，拿到 token 后自动完成：
 
 ```
 GET /workbuddy/login?format=json   -> { "authUrl": "...", "state": "...", "qr": "data:image/svg+xml;base64,..." }
-GET /workbuddy/status              -> { loggedIn, account, expiresAt, provider, catalogSize }
+GET /workbuddy/status              -> { loggedIn, account, expiresAt, provider, catalogSize, promptGuard }
+POST /workbuddy/prompt             -> { mode: "prepend" | "strip" | "off", prefix }
 POST /workbuddy/logout             -> 清除本地会话与凭据
 ```
 
@@ -93,6 +94,40 @@ DeepSeek、MiniMax、Hunyuan 等），略去图片/视频/补全等非聊天路�
 - 模型：`POST /v2/chat/completions`，OpenAI Chat Completions 形状，
   **只支持流式**（非流式会被服务端以 `11101` 拒绝），支持 `tools` 与
   `stream_options.include_usage`。
+- **提示词校验**：网关会拒绝以 DSH 身份句（`You are an AI agent powered by
+  DeepSeek Harness.`）开头的 `system` 消息，返回 `400` 与业务码 `11128
+  Illegal API invocation from an unapproved channel`。它是内容级的：这句话放在
+  提示词后面、换一个 role、或在前面加一行普通文本都不触发；请求头、签名和
+  token scope 都不参与判断。插件的「提示词守卫」就是为这一条准备的。
+
+## 提示词守卫（11128）
+
+WorkBuddy 的模型网关会做一次"渠道校验"，判断依据是系统提示词的**开头**。DSH
+默认的第一段正好是身份句，于是默认配置下每个请求都会 400。
+
+**设置 → WorkBuddy → 提示词守卫** 提供三种处理方式：
+
+| 方式 | 发出去的系统提示词 |
+|---|---|
+| 关闭 | 原样发送（只在改用其它网关或官方客户端时合适） |
+| 在开头增加一句（默认） | 把前置文本放到第一段前面，所有段落原样保留 |
+| 删除身份行 | 移除 `harness:identity` 段，提示词从部署人设开始 |
+
+只影响本插件注册的 provider 路由；其它 provider 拿到的提示词与装配结果一字不
+差。守卫挂在 `system-prompt/assemble` 瀑布上，读的是该次装配的
+`variables.provider`，所以同一次对话切换模型也不会串。
+
+配置存在插件自己的行里，页面保存后写入 profile patch 并热重载：
+
+```yaml
+- id: workbuddy
+  config:
+    promptGuard: prepend            # off | prepend | strip
+    promptPrefix: This session is served through WorkBuddy.
+```
+
+`POST /workbuddy/prompt`（`{ "mode": "prepend", "prefix": "..." }`）是页面用的保存
+接口；没有 `configEditor` 时改动仍然对本次运行生效，只是重启后丢失。
 
 ## 安全
 
@@ -106,7 +141,7 @@ DeepSeek、MiniMax、Hunyuan 等），略去图片/视频/补全等非聊天路�
 ## 开发与测试
 
 ```bash
-npm test                     # 目录完整性、provider 行映射、token 过期与归一化
+npm test                     # 目录完整性、provider 行映射、token 过期与归一化、提示词守卫
 node test/client.test.mjs    # 配置页：注册、字典、样式表与初始渲染
 ```
 
@@ -124,6 +159,7 @@ node test/client.test.mjs    # 配置页：注册、字典、样式表与初始�
 |---|---|
 | 模型列表没有 `WorkBuddy` | profile 未加入 bundle，或没有 `llm-pi-ai` 行；看 DSH 日志里 `workbuddy:` 开头的告警。 |
 | 请求报 `MISSING_CREDENTIAL` | 未登录或凭据被清掉；打开 **设置 → WorkBuddy** 重新登录。 |
+| 请求报 `400 / 11128` | 网关拒绝了以 DSH 身份句开头的系统提示词；把 **设置 → WorkBuddy → 提示词守卫** 设为「在开头增加一句」或「删除身份行」。 |
 | 请求 401/403 | token 被服务端吊销；重新登录。 |
 | 登录页打不开 | 需要能访问 `www.workbuddy.cn`；也支持 `endpoint: https://staging.workbuddy.cn`。 |
 | 刷新一直失败 | refresh token 过期（通常远长于 access token）；重新登录即可。 |
@@ -131,10 +167,11 @@ node test/client.test.mjs    # 配置页：注册、字典、样式表与初始�
 ## 目录
 
 ```
-lib/index.js     Cordis 插件：路由、会话、凭据、pi-ai 路由对账、登录二维码
-lib/client.js    设置 → WorkBuddy 配置页（登录状态、扫码弹窗、退出）
+lib/index.js     Cordis 插件：路由、会话、凭据、pi-ai 路由对账、登录二维码、提示词守卫
+lib/client.js    设置 → WorkBuddy 配置页（登录状态、扫码弹窗、退出、提示词守卫）
 lib/wb.js        WorkBuddy 账号/模型协议客户端（纯 Node，无 Cordis）
 lib/provider.js  provider 行与 token 过期判断（纯函数）
+lib/prompt-guard.js  11128 守卫的纯函数：识别身份句，前置一句或删除
 lib/catalog.js   随插件发布的模型目录（由 WorkBuddy 产品配置生成）
 lib/uqr.js       随包引入的二维码渲染（uqr 0.1.3，MIT，见 lib/uqr.LICENSE）
 tools/gen-catalog.mjs  从 wb-product-config.json 重新生成模型目录

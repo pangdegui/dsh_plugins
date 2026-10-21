@@ -36,8 +36,15 @@ window.__ModuleLoader__.load({
     const STATUS_PATH = '/workbuddy/status'
     const LOGIN_PATH = '/workbuddy/login?format=json'
     const LOGOUT_PATH = '/workbuddy/logout'
+    const GUARD_PATH = '/workbuddy/prompt'
 
     const STYLE_ID = 'dsh-workbuddy'
+
+    /**
+     * Mirrors the Host default so the field is never empty before the status
+     * fetch resolves; whatever `promptGuard.prefix` reports is authoritative.
+     */
+    const DEFAULT_GUARD_PREFIX = 'This session is served through WorkBuddy.'
 
     /** How often the open login dialog checks whether the phone finished. */
     const POLL_MS = 1500
@@ -47,7 +54,7 @@ window.__ModuleLoader__.load({
     const zh = {
       nav: 'WorkBuddy',
       title: 'WorkBuddy 模型接入',
-      intro: '登录 WorkBuddy 账号，把它提供的聊天模型接入 DSH。登录状态与 token 到期时间都在这里显示，临近到期会自动刷新。',
+      intro: '登录 WorkBuddy 账号，把它提供的聊天模型接入 DSH。登录状态与 token 到期时间都在这里显示，临近到期会自动刷新；提示词守卫负责通过网关的 11128 渠道校验。',
 
       sectionAccount: '账号',
       loggedIn: '已登录',
@@ -69,6 +76,18 @@ window.__ModuleLoader__.load({
       routeModelsCount: '{count} 个模型',
       routeHint: '登录后即可在 DSH 的模型选择器里选择这些模型；未登录时请求会以 MISSING_CREDENTIAL 失败。',
 
+      sectionGuard: '提示词守卫',
+      guardHint: 'WorkBuddy 网关会拒绝以 DSH 身份句开头的系统提示词（400 / 11128）。这里决定发送前怎么处理：前置一句只会改变开头，身份句仍然保留；删除身份行则让提示词从部署人设开始。只影响 WorkBuddy 路由。',
+      guardMode: '处理方式',
+      guardModeOff: '关闭（原样发送）',
+      guardModePrepend: '在开头增加一句',
+      guardModeStrip: '删除身份行',
+      guardPrefix: '前置文本',
+      guardPrefixHint: '只在「在开头增加一句」时使用；留空会恢复默认文本。',
+      guardSave: '保存',
+      guardSaved: '已保存，下一次请求立即生效。',
+      guardSaveFailed: '保存失败：{error}',
+
       loginTitle: '扫码登录 WorkBuddy',
       loginHint: '用手机 WorkBuddy 或微信扫描二维码，也可以点下面的链接在浏览器中打开。登录完成后本窗口会自动关闭。',
       loginWaiting: '等待扫码…',
@@ -83,13 +102,13 @@ window.__ModuleLoader__.load({
       loadFailed: '读取状态失败：{error}',
 
       sectionHelp: '说明',
-      help: 'endpoint、provider、凭据名和是否自动注册模型路由由 profile 的插件配置决定；这个页面只管理账号。',
+      help: 'endpoint、provider、凭据名和是否自动注册模型路由由 profile 的插件配置决定；这个页面管理账号和提示词守卫。',
     }
 
     const en = {
       nav: 'WorkBuddy',
       title: 'WorkBuddy models',
-      intro: 'Sign in to WorkBuddy to make its chat models available in DSH. The login state and token expiry live here, and the token refreshes before it expires.',
+      intro: 'Sign in to WorkBuddy to make its chat models available in DSH. The login state and token expiry live here, and the token refreshes before it expires; the prompt guard below gets requests past the gateway\'s 11128 channel check.',
 
       sectionAccount: 'Account',
       loggedIn: 'Signed in',
@@ -111,6 +130,18 @@ window.__ModuleLoader__.load({
       routeModelsCount: '{count} models',
       routeHint: 'After signing in, pick these models in the DSH model picker. Without a login, requests fail with MISSING_CREDENTIAL.',
 
+      sectionGuard: 'Prompt guard',
+      guardHint: 'The WorkBuddy gateway rejects a system prompt that opens with the DSH identity sentence (400 / 11128). This decides what the plugin sends instead: prepending one line only moves the opening, keeping the identity sentence; removing it starts the prompt at the deployment persona. The WorkBuddy route only.',
+      guardMode: 'Handling',
+      guardModeOff: 'Off (send as is)',
+      guardModePrepend: 'Add one line in front',
+      guardModeStrip: 'Remove the identity line',
+      guardPrefix: 'Prefix text',
+      guardPrefixHint: 'Used only by “Add one line in front”; clearing it restores the default.',
+      guardSave: 'Save',
+      guardSaved: 'Saved; the next request uses it.',
+      guardSaveFailed: 'Could not save: {error}',
+
       loginTitle: 'Sign in to WorkBuddy',
       loginHint: 'Scan the code with the WorkBuddy app or WeChat on your phone, or open the link below in a browser. This dialog closes by itself once the sign-in completes.',
       loginWaiting: 'Waiting for the scan…',
@@ -125,7 +156,7 @@ window.__ModuleLoader__.load({
       loadFailed: 'Could not read the state: {error}',
 
       sectionHelp: 'Note',
-      help: 'The endpoint, provider, credential name and automatic route registration come from the plugin config in the profile; this page manages the account only.',
+      help: 'The endpoint, provider, credential name and automatic route registration come from the plugin config in the profile; this page manages the account and the prompt guard.',
     }
 
     // --- styles ----------------------------------------------------------------
@@ -149,6 +180,10 @@ window.__ModuleLoader__.load({
 .wb_dotOk { background:var(--dsw-alias-state-success-primary); }
 .wb_dotBad { background:var(--dsw-alias-state-idle-primary); }
 .wb_actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.wb_field { display:flex; flex-direction:column; gap:6px; }
+.wb_select, .wb_input { height:32px; padding:0 10px; border:1px solid var(--dsw-alias-border-l1); border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-base); color:var(--dsw-alias-label-primary); font:inherit; font-size:13px; min-width:0; }
+.wb_select:focus-visible, .wb_input:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }
+.wb_select:disabled, .wb_input:disabled { opacity:.5; }
 .wb_button { height:32px; padding:0 14px; border:1px solid var(--dsw-alias-border-l1); border-radius:var(--dsw-radius-md); background:transparent; color:var(--dsw-alias-label-primary); font:inherit; font-size:13px; cursor:pointer; }
 .wb_button:hover:not(:disabled) { background:var(--dsw-alias-bg-layer-2); }
 .wb_button:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
@@ -217,10 +252,20 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [notice, setNotice] = useState(null)
       const [login, setLogin] = useState(null)
+      const [guardMode, setGuardMode] = useState('prepend')
+      const [guardPrefix, setGuardPrefix] = useState(DEFAULT_GUARD_PREFIX)
+      const [guardBusy, setGuardBusy] = useState(false)
+      const [guardNotice, setGuardNotice] = useState(null)
 
       const refresh = useCallback(async () => {
         try {
-          setStatus(await readJson(STATUS_PATH))
+          const body = await readJson(STATUS_PATH)
+          setStatus(body)
+          const guard = body?.promptGuard
+          if (guard !== undefined) {
+            if (typeof guard.mode === 'string') setGuardMode(guard.mode)
+            if (typeof guard.prefix === 'string' && guard.prefix !== '') setGuardPrefix(guard.prefix)
+          }
           setLoadError(null)
         } catch (cause) {
           setLoadError(describeError(cause))
@@ -265,6 +310,30 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }, [refresh, t])
+
+      const saveGuard = useCallback(async () => {
+        setGuardBusy(true)
+        setGuardNotice(null)
+        try {
+          const body = await readJson(GUARD_PATH, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ mode: guardMode, prefix: guardPrefix }),
+          })
+          const guard = body?.promptGuard
+          if (guard !== undefined) {
+            if (typeof guard.mode === 'string') setGuardMode(guard.mode)
+            if (typeof guard.prefix === 'string' && guard.prefix !== '') setGuardPrefix(guard.prefix)
+          }
+          const persisted = body?.persisted !== false
+          const text = typeof body?.message === 'string' && body.message !== '' ? body.message : t('guardSaved')
+          setGuardNotice({ kind: persisted ? 'ok' : 'error', text })
+        } catch (cause) {
+          setGuardNotice({ kind: 'error', text: t('guardSaveFailed', { error: describeError(cause) }) })
+        } finally {
+          setGuardBusy(false)
+        }
+      }, [guardMode, guardPrefix, t])
 
       // While the dialog is open, watch the Host: its login poll is the thing
       // that actually completes, and the page only mirrors that state.
@@ -522,6 +591,66 @@ window.__ModuleLoader__.load({
             ]),
           ]),
           h('p', { key: 'hint', className: 'wb_hint' }, t('routeHint')),
+        ]),
+
+        // 3. how the outbound prompt is adapted for this gateway
+        h('section', { key: 'guard', className: 'wb_section' }, [
+          h('h3', { key: 'h', className: 'wb_label' }, t('sectionGuard')),
+          h('div', { key: 'card', className: 'wb_card' }, [
+            h('label', { key: 'mode', className: 'wb_field' }, [
+              h('span', { key: 'k', className: 'wb_hint' }, t('guardMode')),
+              h(
+                'select',
+                {
+                  key: 'v',
+                  className: 'wb_select',
+                  value: guardMode,
+                  disabled: guardBusy,
+                  onChange: (event) => setGuardMode(event.target.value),
+                },
+                [
+                  h('option', { key: 'off', value: 'off' }, t('guardModeOff')),
+                  h('option', { key: 'prepend', value: 'prepend' }, t('guardModePrepend')),
+                  h('option', { key: 'strip', value: 'strip' }, t('guardModeStrip')),
+                ],
+              ),
+            ]),
+            guardMode === 'prepend'
+              ? h('label', { key: 'prefix', className: 'wb_field' }, [
+                  h('span', { key: 'k', className: 'wb_hint' }, t('guardPrefix')),
+                  h('input', {
+                    key: 'v',
+                    className: 'wb_input',
+                    type: 'text',
+                    value: guardPrefix,
+                    disabled: guardBusy,
+                    onChange: (event) => setGuardPrefix(event.target.value),
+                  }),
+                  h('span', { key: 'note', className: 'wb_hint' }, t('guardPrefixHint')),
+                ])
+              : null,
+            h('p', { key: 'hint', className: 'wb_hint' }, t('guardHint')),
+          ]),
+          h('div', { key: 'actions', className: 'wb_actions' }, [
+            h(
+              'button',
+              {
+                key: 'save',
+                type: 'button',
+                className: 'wb_button wb_primary',
+                disabled: guardBusy,
+                onClick: () => void saveGuard(),
+              },
+              guardBusy ? t('busy') : t('guardSave'),
+            ),
+          ]),
+          guardNotice === null
+            ? null
+            : h(
+                'p',
+                { key: 'notice', className: guardNotice.kind === 'ok' ? 'wb_success' : 'wb_error', role: 'status' },
+                guardNotice.text,
+              ),
         ]),
 
         h('p', { key: 'help', className: 'wb_hint' }, `${t('sectionHelp')}: ${t('help')}`),

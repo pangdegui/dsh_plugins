@@ -40,6 +40,13 @@ import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { WORKBUDDY_DEFAULT_MODEL, WORKBUDDY_MODELS } from './catalog.js'
+import {
+  DEFAULT_PROMPT_PREFIX,
+  HARNESS_IDENTITY,
+  guardAssembly,
+  normalizePromptGuard,
+  normalizePromptPrefix,
+} from './prompt-guard.js'
 import { needsRefresh, providerConfig } from './provider.js'
 import { ANONYMOUS_HEADERS, WorkBuddyClient, normalizeToken } from './wb.js'
 import { renderSVG } from './uqr.js'
@@ -73,6 +80,17 @@ export const Config = z.object({
   syncProviderModels: z.boolean().default(false),
   /** Refresh this long before the access token expires. */
   refreshSkewMs: z.number().default(10 * 60_000),
+  /**
+   * How the outbound system prompt avoids WorkBuddy's channel check.
+   *
+   * `off` sends the prompt untouched (the gateway answers 11128 for a prompt
+   * that opens with DSH's identity sentence). `prepend` puts `promptPrefix` in
+   * front of the first section, keeping every section. `strip` drops the
+   * identity section entirely, so the prompt opens with the deployment persona.
+   */
+  promptGuard: z.union([z.const('off'), z.const('prepend'), z.const('strip')]).default('prepend'),
+  /** One line inserted at the very start of the prompt when `promptGuard` is `prepend`. */
+  promptPrefix: z.string().default(DEFAULT_PROMPT_PREFIX),
 })
 
 const ROUTE_BASE = '/workbuddy'
@@ -128,6 +146,32 @@ function sameProviderConfig(left, right) {
   } catch {
     return false
   }
+}
+
+/**
+ * Which provider an assembly is being built for.
+ *
+ * The prompt service resolves its `provider` variable from
+ * `context.agent.options.provider` while assembling, so the primary source is
+ * already present on the assembly. The agent's model-selection listener may
+ * override the same variable for a concurrent switch, which is why this reads
+ * the post-waterfall assembly rather than the context. The persisted request
+ * header is a last resort for an agent whose options do not name a route.
+ *
+ * @param assembly - the post-waterfall assembly.
+ * @param context - the waterfall context (`{ agent, scope, signal }`).
+ * @returns the provider name, or undefined when it cannot be determined.
+ */
+function assemblyProvider(assembly, context) {
+  const selected = assembly?.variables?.provider
+  if (typeof selected === 'string' && selected !== '') return selected
+  try {
+    const provider = context?.agent?.session?.requestHeader?.()?.config?.provider
+    if (typeof provider === 'string' && provider !== '') return provider
+  } catch {
+    /* a session without a header yet is not an error */
+  }
+  return undefined
 }
 
 /**
@@ -207,6 +251,57 @@ async function clearPublishedToken(ctx, config) {
     await credentials.unset(config.credentialRef)
   } catch (error) {
     ctx.logger?.warn?.(`workbuddy: could not remove the stored token: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * Persist the prompt-guard settings into this plugin's own config row.
+ *
+ * `configEditor.edit()` validates the row, writes it into the profile patch and
+ * lets the Loader reload this entry, so the page's change survives a restart.
+ * The row is rewritten in full because the editor replaces a value, not a
+ * field: leaving a key out would fall back to the schema default instead of
+ * keeping what the profile already had.
+ *
+ * @param ctx - plugin context, for the editor seam.
+ * @param config - the resolved config currently in effect.
+ * @param next - `{ mode, prefix }` to store.
+ * @returns `{ ok, text }`, user-facing.
+ */
+async function persistPromptGuard(ctx, config, next) {
+  const editor = ctx.get('configEditor')
+  if (editor === undefined || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
+    return { ok: false, text: '配置编辑器不可用：改动只在本次运行内生效，重启后会丢失。' }
+  }
+  let entry
+  try {
+    entry = editor.entries().find((candidate) => {
+      const options = candidate?.options
+      if (options === undefined) return false
+      return options.id === 'workbuddy' || options.name === 'dsh-workbuddy'
+    })
+  } catch (error) {
+    return { ok: false, text: `无法读取配置条目：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (entry === undefined) {
+    return { ok: false, text: '没有可写的配置条目：本插件不是以可配置行加载的。' }
+  }
+  const row = {
+    endpoint: config.endpoint,
+    provider: config.provider,
+    displayName: config.displayName,
+    credentialRef: config.credentialRef,
+    autoRegisterProvider: config.autoRegisterProvider,
+    syncProviderModels: config.syncProviderModels,
+    refreshSkewMs: config.refreshSkewMs,
+    promptGuard: next.mode,
+    promptPrefix: next.prefix,
+  }
+  try {
+    await editor.edit(entry, () => row)
+    return { ok: true, text: '已保存到配置文件，下一次请求立即生效。' }
+  } catch (error) {
+    return { ok: false, text: `写入配置文件失败：${error instanceof Error ? error.message : String(error)}` }
   }
 }
 
@@ -325,6 +420,37 @@ function sendHtml(res, status, html) {
   res.end(html)
 }
 
+/** Read a small JSON request body, capped so a stray upload cannot sit in memory. */
+function readJsonBody(req, maxBytes = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > maxBytes) {
+        reject(new Error('请求体过大'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8')
+      try {
+        const parsed = text === '' ? {} : JSON.parse(text)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          reject(new Error('请求内容必须是一个对象'))
+          return
+        }
+        resolve(parsed)
+      } catch (error) {
+        reject(new Error(`请求不是有效的 JSON：${error instanceof Error ? error.message : String(error)}`))
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
 /** Escape one interpolated value before it enters the login page's HTML. */
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => {
@@ -407,7 +533,45 @@ function registerRoutes(ctx, config, client, state) {
         provider: config.provider,
         displayName: config.displayName,
         catalogSize: WORKBUDDY_MODELS.length,
+        promptGuard: {
+          mode: config.promptGuard,
+          prefix: config.promptPrefix,
+          identity: HARNESS_IDENTITY,
+        },
         ...sessionView(state.session),
+      })
+    }),
+  }))
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/prompt`,
+    handler: guarded(async (req, res) => {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'use POST' })
+      let body
+      try {
+        body = await readJsonBody(req)
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      }
+      const mode = normalizePromptGuard(body.mode, null)
+      if (mode === null) {
+        return sendJson(res, 400, { error: 'mode 必须是 off、prepend 或 strip' })
+      }
+      // A blank prefix means "use the shipped default", not "send nothing":
+      // `prepend` with an empty line would be indistinguishable from `off`.
+      const prefix = normalizePromptPrefix(typeof body.prefix === 'string' ? body.prefix : config.promptPrefix)
+      const outcome = await persistPromptGuard(ctx, config, { mode, prefix })
+      // Apply in memory too: without a config editor the change must still take
+      // effect for this run, and the listener reads these fields per assembly.
+      config.promptGuard = mode
+      config.promptPrefix = prefix
+      ctx.logger?.info?.(`workbuddy: prompt guard ${mode}${outcome.ok ? '' : ' (not persisted)'}`)
+      sendJson(res, 200, {
+        ok: true,
+        persisted: outcome.ok,
+        message: outcome.text,
+        promptGuard: { mode: config.promptGuard, prefix: config.promptPrefix, identity: HARNESS_IDENTITY },
       })
     }),
   }))
@@ -497,10 +661,30 @@ export function apply(ctx, config) {
     autoRegisterProvider: config?.autoRegisterProvider !== false,
     syncProviderModels: config?.syncProviderModels === true,
     refreshSkewMs: Number.isFinite(config?.refreshSkewMs) ? Math.max(0, config.refreshSkewMs) : 10 * 60_000,
+    promptGuard: normalizePromptGuard(config?.promptGuard, 'prepend'),
+    promptPrefix: normalizePromptPrefix(config?.promptPrefix),
   }
   const client = new WorkBuddyClient({ endpoint: resolved.endpoint })
   const loaded = loadSession(ctx.logger)
   const state = { session: loaded?.endpoint === resolved.endpoint ? loaded : undefined }
+
+  // The prompt guard sits on the assembly waterfall: it sees the finished
+  // prompt before the loop renders it into the session, and it rewrites only
+  // assemblies addressed to this plugin's provider. `prepend` keeps the plugin
+  // outermost so a later listener (the agent's model selection) cannot hide the
+  // provider variable this reads.
+  ctx.effect(
+    () =>
+      ctx.on(
+        'system-prompt/assemble',
+        async (assembly, context, next) => {
+          const assembled = await next()
+          return guardAssembly(resolved, assembled, assemblyProvider(assembled, context))
+        },
+        { global: true, prepend: true },
+      ),
+    'workbuddy: prompt guard',
+  )
 
   // Publish whatever we already have, then keep it fresh. Both steps are
   // effects: they dispose with the plugin and never write during teardown.
@@ -566,5 +750,7 @@ export const internals = {
   providerConfig,
   needsRefresh,
   normalizeToken,
+  guardAssembly,
+  assemblyProvider,
   startLogin,
 }

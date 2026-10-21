@@ -5,6 +5,13 @@
  */
 import assert from 'node:assert/strict'
 import { WORKBUDDY_DEFAULT_MODEL, WORKBUDDY_MODELS } from '../lib/catalog.js'
+import {
+  DEFAULT_PROMPT_PREFIX,
+  guardAssembly,
+  isIdentitySection,
+  normalizePromptGuard,
+  normalizePromptPrefix,
+} from '../lib/prompt-guard.js'
 import { needsRefresh, providerConfig } from '../lib/provider.js'
 import { normalizeToken } from '../lib/wb.js'
 
@@ -56,4 +63,84 @@ assert.equal(token.refreshExpiresAt, now + 120_000)
 assert.equal(token.tokenType, 'Bearer')
 assert.throws(() => normalizeToken({ refreshToken: 'r' }), /no access token/)
 
-console.log(`ok: ${WORKBUDDY_MODELS.length} models, provider row and token arithmetic verified`)
+// --- prompt guard ----------------------------------------------------------
+const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
+
+assert.equal(normalizePromptGuard('prepend'), 'prepend')
+assert.equal(normalizePromptGuard('strip'), 'strip')
+assert.equal(normalizePromptGuard('off'), 'off')
+assert.equal(normalizePromptGuard('nonsense'), 'off')
+assert.equal(normalizePromptGuard(undefined), 'off')
+assert.equal(normalizePromptGuard(undefined, 'prepend'), 'prepend')
+assert.equal(normalizePromptGuard('nonsense', null), null)
+
+assert.equal(normalizePromptPrefix(''), DEFAULT_PROMPT_PREFIX)
+assert.equal(normalizePromptPrefix('   '), DEFAULT_PROMPT_PREFIX)
+assert.equal(normalizePromptPrefix(undefined), DEFAULT_PROMPT_PREFIX)
+assert.equal(normalizePromptPrefix('  one line \r\n'), 'one line')
+assert.equal(normalizePromptPrefix('', ''), '')
+
+assert.equal(isIdentitySection({ name: 'harness:identity', text: '' }), true)
+assert.equal(isIdentitySection({ name: 'other', text: IDENTITY }), true)
+assert.equal(isIdentitySection({ name: 'other', text: `  ${IDENTITY.toLowerCase()}` }), true)
+assert.equal(isIdentitySection({ name: 'persona', text: 'You are a coding agent.' }), false)
+
+/** One assembly shaped like the real one: identity first, persona second. */
+const makeAssembly = () => ({
+  sections: [
+    { name: 'harness:identity', text: IDENTITY },
+    { name: 'persona', text: 'You are a coding agent powered by the hy3 model.' },
+  ],
+  contexts: [],
+  tools: [],
+  variables: { provider: 'workbuddy', model: 'hy3' },
+})
+
+const settings = { provider: 'workbuddy', promptGuard: 'prepend', promptPrefix: 'Hello gateway.' }
+
+// off: nothing changes, and it is the same object.
+const untouched = makeAssembly()
+assert.equal(guardAssembly({ ...settings, promptGuard: 'off' }, untouched, 'workbuddy'), untouched)
+
+// a different provider keeps the exact assembly.
+assert.equal(guardAssembly(settings, untouched, 'command'), untouched)
+
+// an unknown provider is left alone rather than guessed at.
+assert.equal(guardAssembly(settings, untouched, undefined), untouched)
+
+// prepend puts the prefix in front of the first section and keeps every section.
+const prepended = guardAssembly(settings, makeAssembly(), 'workbuddy')
+assert.equal(prepended.sections.length, 2)
+assert.ok(prepended.sections[0].text.startsWith('Hello gateway.\n\n'))
+assert.ok(prepended.sections[0].text.includes(IDENTITY))
+assert.deepEqual(prepended.sections[1], { name: 'persona', text: 'You are a coding agent powered by the hy3 model.' })
+// The input assembly is never mutated, so another provider keeps its prompt.
+assert.equal(untouched.sections[0].text, IDENTITY)
+// Re-running on the produced assembly does not stack a second prefix.
+const twice = guardAssembly(settings, prepended, 'workbuddy')
+assert.equal(twice.sections[0].text, prepended.sections[0].text)
+
+// the guarded prompt no longer *opens* with the identity sentence.
+assert.ok(!prepended.sections[0].text.startsWith(IDENTITY))
+
+// strip removes only the identity section.
+const stripped = guardAssembly({ ...settings, promptGuard: 'strip' }, makeAssembly(), 'workbuddy')
+assert.equal(stripped.sections.length, 1)
+assert.equal(stripped.sections[0].name, 'persona')
+assert.ok(!stripped.sections[0].text.includes('DeepSeek Harness'))
+
+// stripping an assembly that has no identity section leaves it alone.
+const personaOnly = { sections: [{ name: 'persona', text: 'You are a coding agent.' }], variables: {} }
+assert.equal(guardAssembly({ ...settings, promptGuard: 'strip' }, personaOnly, 'workbuddy'), personaOnly)
+
+// an empty assembly is never turned into an empty prompt by `strip`.
+const empty = { sections: [], variables: {} }
+assert.equal(guardAssembly({ ...settings, promptGuard: 'strip' }, empty, 'workbuddy'), empty)
+assert.equal(guardAssembly(settings, empty, 'workbuddy'), empty)
+
+// a blank configured prefix falls back to the shipped default.
+const blank = guardAssembly({ ...settings, promptPrefix: '   ' }, makeAssembly(), 'workbuddy')
+assert.ok(blank.sections[0].text.startsWith(`${DEFAULT_PROMPT_PREFIX}\n\n`))
+
+// --- summary ---------------------------------------------------------------
+console.log(`ok: ${WORKBUDDY_MODELS.length} models, provider row, token arithmetic and prompt guard verified`)

@@ -12,3 +12,5 @@
         autoRegisterProvider: true
         syncProviderModels: false
         refreshSkewMs: 600000
+        promptGuard: prepend
+        promptPrefix: This session is served through WorkBuddy.

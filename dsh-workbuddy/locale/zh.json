@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "WorkBuddy 模型接入",
-    "description": "把 WorkBuddy（腾讯 WorkBuddy）的账号登录与聊天模型接入 DeepSeek Harness：浏览器登录、token 自动轮换，并注册一条 pi-ai provider 路由。"
+    "description": "把 WorkBuddy（腾讯 WorkBuddy）的账号登录与聊天模型接入 DeepSeek Harness：浏览器登录、token 自动轮换、一条 pi-ai provider 路由，以及绕开网关 11128 的提示词守卫。"
   }
 }
