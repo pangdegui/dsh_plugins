@@ -116,6 +116,13 @@ WorkBuddy 的模型网关会做一次"渠道校验"，对两种请求返回 `400
 不需要用户配置。第 1 条取决于提示词内容，**设置 → WorkBuddy → 提示词守卫**
 提供三种处理方式：
 
+除此之外，插件还在 `globalThis.fetch` 上装了一层**出站守卫**（`lib/wire.js`）：
+发往本插件端点的 `/v2/chat/completions` 请求，如果带 `developer` 角色，会在
+离开进程前改写成 `system`。这样即使某个 DSH 版本的 adapter 没有把 `compat`
+传下去，网关看到的仍是它接受的角色。每个被检查的请求会往
+`$DSH_HOME/workbuddy/wire.log` 记一行（角色、工具数、token 上限、每条指令消息
+的开头 60 字），token 不落盘。
+
 | 方式 | 发出去的系统提示词 |
 |---|---|
 | 关闭 | 原样发送（只在改用其它网关或官方客户端时合适） |
@@ -195,10 +202,12 @@ lib/client.js    设置 → WorkBuddy 配置页（登录状态、扫码弹窗、
 lib/wb.js        WorkBuddy 账号/模型协议客户端（纯 Node，无 Cordis）
 lib/provider.js  provider 行与 token 过期判断（纯函数）
 lib/prompt-guard.js  11128 守卫的纯函数：识别身份句，前置一句或删除
+lib/wire.js      出站守卫：把发往网关的 developer 角色改写成 system，并记录 wire.log
 lib/catalog.js   随插件发布的模型目录（由 WorkBuddy 产品配置生成）
 lib/uqr.js       随包引入的二维码渲染（uqr 0.1.3，MIT，见 lib/uqr.LICENSE）
 tools/gen-catalog.mjs  从 wb-product-config.json 重新生成模型目录
 test/unit.mjs    无网络单元检查（npm test）
+test/wire.test.mjs   出站守卫的改写/放行/日志检查
 test/client.test.mjs  配置页的加载器/注册/渲染检查
 locale/*.json    插件清单里的名称与说明
 icon.svg         插件图标

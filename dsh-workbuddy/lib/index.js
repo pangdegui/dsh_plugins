@@ -49,6 +49,7 @@ import {
 } from './prompt-guard.js'
 import { needsRefresh, providerConfig } from './provider.js'
 import { ANONYMOUS_HEADERS, WorkBuddyClient, normalizeToken } from './wb.js'
+import { installWireGuard } from './wire.js'
 import { renderSVG } from './uqr.js'
 
 export const name = 'workbuddy'
@@ -667,6 +668,20 @@ export function apply(ctx, config) {
   const client = new WorkBuddyClient({ endpoint: resolved.endpoint })
   const loaded = loadSession(ctx.logger)
   const state = { session: loaded?.endpoint === resolved.endpoint ? loaded : undefined }
+
+  // The gateway rejects the `developer` instruction role with 11128, and the
+  // route's compat switch is only one layer of defence: this wrapper normalizes
+  // the role on the wire, for every request this process sends to the endpoint.
+  // It also records what was sent, since the gateway's block looks the same
+  // whichever reason triggered it.
+  ctx.effect(
+    () =>
+      installWireGuard({
+        endpoint: resolved.endpoint,
+        logDirectory: path.join(dshHome(), 'workbuddy'),
+      }),
+    'workbuddy: wire guard',
+  )
 
   // The prompt guard sits on the assembly waterfall: it sees the finished
   // prompt before the loop renders it into the session, and it rewrites only
