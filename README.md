@@ -22,10 +22,18 @@
 3. 填入索引 URL：
 
    ```
+   https://cdn.jsdelivr.net/gh/pangdegui/dsh_plugins@master/plugin-market.json
+   ```
+
+   索引拒绝重定向，必须使用最终地址。`raw.githubusercontent.com` 在国内网络下经常
+   连不上（DSH 报「无法读取此索引」就是这一种），所以优先用上面的 jsDelivr 地址；
+   它等价于
+
+   ```
    https://raw.githubusercontent.com/pangdegui/dsh_plugins/master/plugin-market.json
    ```
 
-   索引拒绝重定向，必须使用最终地址；如果你更喜欢 CDN，可以用等价的 jsDelivr 地址。
+   jsDelivr 对 `@master` 有 CDN 缓存（最长数小时），刚发布的新版本可能延迟出现。
 
 4. 之后即可在 **发现** 里浏览、搜索并安装；安装会用索引里钉死的提交与子目录，例如
    `git+https://github.com/pangdegui/dsh_plugins.git#<commit>&path:/dsh-workbuddy`。
