@@ -1,0 +1,220 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Pangdegui's DSH plugins",
+    "zh": "Pangdegui 的 DSH 插件"
+  },
+  "description": {
+    "en": "Small, self-contained DeepSeek Harness plugins: session cleanup, network access control, per-model proxying, and WorkBuddy models.",
+    "zh": "一组自包含的 DeepSeek Harness 插件：会话清理、网络访问控制、按模型走代理，以及 WorkBuddy 模型接入。"
+  },
+  "metadata": {
+    "categories": {
+      "models": {
+        "title": {
+          "en": "Models",
+          "zh": "模型"
+        }
+      },
+      "remote-access": {
+        "title": {
+          "en": "Remote access",
+          "zh": "远程访问"
+        }
+      },
+      "productivity": {
+        "title": {
+          "en": "Productivity",
+          "zh": "效率"
+        }
+      }
+    },
+    "labels": {
+      "web": {
+        "title": {
+          "en": "Web UI",
+          "zh": "Web 界面"
+        }
+      },
+      "desktop": {
+        "title": {
+          "en": "Desktop",
+          "zh": "桌面端"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-model-proxy",
+      "title": {
+        "en": "Model proxy",
+        "zh": "模型代理"
+      },
+      "description": {
+        "en": "Route chosen models through one HTTP proxy while every other request keeps its normal network path, configured from Settings.",
+        "zh": "只让选中的模型走指定 HTTP 代理，其他请求保持原网络路径；在设置页即可切换。"
+      },
+      "icon": "dsh-model-proxy/icon.svg",
+      "author": "pangdegui",
+      "homepage": "https://github.com/pangdegui/dsh_plugins/tree/master/dsh-model-proxy",
+      "repository": {
+        "url": "https://github.com/pangdegui/dsh_plugins",
+        "directory": "dsh-model-proxy"
+      },
+      "metadata": {
+        "category": "models",
+        "labels": [
+          "web",
+          "desktop"
+        ],
+        "keywords": [
+          "model",
+          "proxy",
+          "routing",
+          "network"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.2.0",
+          "publishTimestamp": 1792549171,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/pangdegui/dsh_plugins",
+            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "path": "dsh-model-proxy"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dsh-session-delete",
+      "title": {
+        "en": "Session delete",
+        "zh": "会话删除"
+      },
+      "description": {
+        "en": "A Delete session action in the sidebar menu with a risk-consent dialog, removing the session log, projection cache, workspace accounting and spill files.",
+        "zh": "在侧栏菜单里提供「删除会话」，二次确认后清掉会话日志、投影缓存、工作区记账和 spill 文件。"
+      },
+      "icon": "dsh-session-delete/icon.svg",
+      "author": "pangdegui",
+      "homepage": "https://github.com/pangdegui/dsh_plugins/tree/master/dsh-session-delete",
+      "repository": {
+        "url": "https://github.com/pangdegui/dsh_plugins",
+        "directory": "dsh-session-delete"
+      },
+      "metadata": {
+        "category": "productivity",
+        "labels": [
+          "desktop"
+        ],
+        "keywords": [
+          "session",
+          "delete",
+          "cleanup",
+          "history"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.2.0",
+          "publishTimestamp": 1792250368,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/pangdegui/dsh_plugins",
+            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "path": "dsh-session-delete"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dsh-web-access",
+      "title": {
+        "en": "Web access",
+        "zh": "网络访问"
+      },
+      "description": {
+        "en": "Choose the listen address and trusted hosts, and optionally put a TOTP gate in front of the launch token, from a sidebar panel.",
+        "zh": "在侧栏面板里配置监听地址、受信主机，并可选地在启动令牌前加一道 TOTP 验证。"
+      },
+      "icon": "dsh-web-access/icon.svg",
+      "author": "pangdegui",
+      "homepage": "https://github.com/pangdegui/dsh_plugins/tree/master/dsh-web-access",
+      "repository": {
+        "url": "https://github.com/pangdegui/dsh_plugins",
+        "directory": "dsh-web-access"
+      },
+      "metadata": {
+        "category": "remote-access",
+        "labels": [
+          "web"
+        ],
+        "keywords": [
+          "access",
+          "network",
+          "totp",
+          "remote",
+          "security"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.2.0",
+          "publishTimestamp": 1792469409,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/pangdegui/dsh_plugins",
+            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "path": "dsh-web-access"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dsh-workbuddy",
+      "title": {
+        "en": "WorkBuddy models",
+        "zh": "WorkBuddy 模型"
+      },
+      "description": {
+        "en": "Sign in to WorkBuddy with a QR code or browser link and use its chat models from DSH. Rotates tokens automatically and installs the model route for you.",
+        "zh": "用二维码或浏览器链接登录 WorkBuddy，在 DSH 里直接使用它的聊天模型；自动续期 token，并自动装好模型路由。"
+      },
+      "icon": "dsh-workbuddy/icon.svg",
+      "author": "pangdegui",
+      "homepage": "https://github.com/pangdegui/dsh_plugins/tree/master/dsh-workbuddy",
+      "repository": {
+        "url": "https://github.com/pangdegui/dsh_plugins",
+        "directory": "dsh-workbuddy"
+      },
+      "metadata": {
+        "category": "models",
+        "labels": [
+          "web"
+        ],
+        "keywords": [
+          "workbuddy",
+          "tencent",
+          "login",
+          "models",
+          "openai-compatible"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.2.0",
+          "publishTimestamp": 1792549677,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/pangdegui/dsh_plugins",
+            "commit": "32efe9feba0a7f193b676e64b6996348c13564a3",
+            "path": "dsh-workbuddy"
+          }
+        }
+      ]
+    }
+  ]
+}
