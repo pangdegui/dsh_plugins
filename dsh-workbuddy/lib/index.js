@@ -28,9 +28,11 @@
  *   4. **Rotation** — a timer refreshes the token shortly before expiry, so a
  *      long-lived DSH install keeps working without another login.
  *
- * Scope: host only. The plugin declares no client entry because the model
- * picker already renders every pi-ai route; the login surface is a plain HTTP
- * page served next to the app, deliberately script-free.
+ * Scope: one Host row plus one Settings section. The model picker already
+ * renders every pi-ai route, so the browser half is purely the account plane:
+ * login status, a QR code for the WorkBuddy sign-in URL, and sign-out. The
+ * standalone `/workbuddy` page remains as a script-free fallback for callers
+ * that are not the Web UI.
  */
 
 import fs from 'node:fs'
@@ -40,6 +42,7 @@ import z from '@deepseek-ai/schemastery'
 import { WORKBUDDY_DEFAULT_MODEL, WORKBUDDY_MODELS } from './catalog.js'
 import { needsRefresh, providerConfig } from './provider.js'
 import { ANONYMOUS_HEADERS, WorkBuddyClient, normalizeToken } from './wb.js'
+import { renderSVG } from './uqr.js'
 
 export const name = 'workbuddy'
 
@@ -106,7 +109,7 @@ function loadSession(logger) {
     if (parsed?.version !== SESSION_VERSION || typeof parsed?.token?.accessToken !== 'string') return undefined
     return parsed
   } catch (error) {
-    if (error?.code !== 'ENOENT') logger?.warn?.('workbuddy: ignoring unreadable session file: %s', String(error))
+    if (error?.code !== 'ENOENT') logger?.warn?.(`workbuddy: ignoring unreadable session file: ${String(error)}`)
     return undefined
   }
 }
@@ -142,7 +145,13 @@ async function reconcileProvider(ctx, config) {
   if (providerReconciled) return true
   const editor = ctx.get('configEditor')
   if (editor === undefined || typeof editor.entries !== 'function' || typeof editor.edit !== 'function') return false
-  const entry = editor.entries().find((candidate) => candidate?.options?.id === 'llm-pi-ai')
+  // The row is normally found by its patch id. Fall back to the module name so
+  // a profile that re-adds the row with another id still gets the route.
+  const entry = editor.entries().find((candidate) => {
+    const options = candidate?.options
+    if (options === undefined) return false
+    return options.id === 'llm-pi-ai' || options.name === '@deepseek-ai/dsh-llm-pi-ai' || options.name === 'llm-pi-ai'
+  })
   if (entry === undefined) {
     ctx.logger?.warn?.('workbuddy: no llm-pi-ai row in this profile; model route not installed')
     return false
@@ -163,15 +172,14 @@ async function reconcileProvider(ctx, config) {
     providerReconciled = true
     if (skipped) {
       ctx.logger?.info?.(
-        'workbuddy: pi-ai route "%s" already configured; leaving it untouched (set syncProviderModels to rewrite its model list)',
-        config.provider,
+        `workbuddy: pi-ai route "${config.provider}" already configured; leaving it untouched (set syncProviderModels to rewrite its model list)`,
       )
     } else {
-      ctx.logger?.info?.('workbuddy: pi-ai route "%s" reconciled (%s models)', config.provider, WORKBUDDY_MODELS.length)
+      ctx.logger?.info?.(`workbuddy: pi-ai route "${config.provider}" reconciled (${WORKBUDDY_MODELS.length} models)`)
     }
     return true
   } catch (error) {
-    ctx.logger?.warn?.('workbuddy: could not persist the pi-ai route: %s', error instanceof Error ? error.message : String(error))
+    ctx.logger?.warn?.(`workbuddy: could not persist the pi-ai route: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }
@@ -187,7 +195,7 @@ async function publishToken(ctx, config, accessToken) {
     await credentials.set(config.credentialRef, accessToken)
     return true
   } catch (error) {
-    ctx.logger?.warn?.('workbuddy: could not store the access token: %s', error instanceof Error ? error.message : String(error))
+    ctx.logger?.warn?.(`workbuddy: could not store the access token: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }
@@ -198,7 +206,7 @@ async function clearPublishedToken(ctx, config) {
   try {
     await credentials.unset(config.credentialRef)
   } catch (error) {
-    ctx.logger?.warn?.('workbuddy: could not remove the stored token: %s', error instanceof Error ? error.message : String(error))
+    ctx.logger?.warn?.(`workbuddy: could not remove the stored token: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -231,10 +239,10 @@ function startLogin(ctx, client, config, state) {
       const loginState = await client.createLoginState(controller.signal)
       flow.state = loginState.state
       flow.authUrl = loginState.authUrl
-      ctx.logger?.info?.('workbuddy: login required, open %s', loginState.authUrl)
+      ctx.logger?.info?.(`workbuddy: login required, open ${loginState.authUrl}`)
       const token = await client.waitForLogin(loginState.state, { signal: controller.signal })
       const account = await client.fetchAccount(token.accessToken).catch((error) => {
-        ctx.logger?.warn?.('workbuddy: login succeeded but account lookup failed: %s', String(error))
+        ctx.logger?.warn?.(`workbuddy: login succeeded but account lookup failed: ${String(error)}`)
         return undefined
       })
       const session = {
@@ -248,12 +256,12 @@ function startLogin(ctx, client, config, state) {
       state.session = session
       await publishToken(ctx, config, token.accessToken)
       flow.result = session
-      ctx.logger?.info?.('workbuddy: login complete for %s', account?.uid ?? '(unknown)')
+      ctx.logger?.info?.(`workbuddy: login complete for ${account?.uid ?? '(unknown)'}`)
       if (pendingLogin === flow) pendingLogin = undefined
     } catch (error) {
       flow.error = error
       if (pendingLogin === flow) pendingLogin = undefined
-      if (!controller.signal.aborted) ctx.logger?.warn?.('workbuddy: login failed: %s', String(error))
+      if (!controller.signal.aborted) ctx.logger?.warn?.(`workbuddy: login failed: ${String(error)}`)
     }
   })()
 
@@ -276,10 +284,10 @@ async function refreshSession(ctx, config, session, client) {
     const next = { ...session, token, savedAt: Date.now() }
     saveSession(next)
     await publishToken(ctx, config, token.accessToken)
-    ctx.logger?.info?.('workbuddy: access token refreshed, expires %s', new Date(token.expiresAt ?? 0).toISOString())
+    ctx.logger?.info?.(`workbuddy: access token refreshed, expires ${new Date(token.expiresAt ?? 0).toISOString()}`)
     return next
   } catch (error) {
-    ctx.logger?.warn?.('workbuddy: token refresh failed: %s', error instanceof Error ? error.message : String(error))
+    ctx.logger?.warn?.(`workbuddy: token refresh failed: ${error instanceof Error ? error.message : String(error)}`)
     return undefined
   }
 }
@@ -317,14 +325,42 @@ function sendHtml(res, status, html) {
   res.end(html)
 }
 
+/** Escape one interpolated value before it enters the login page's HTML. */
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case '&':
+        return '&amp;'
+      case '<':
+        return '&lt;'
+      case '>':
+        return '&gt;'
+      case '"':
+        return '&quot;'
+      default:
+        return '&#39;'
+    }
+  })
+}
+
 function page(title, body) {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title><style>
-:root{color-scheme:light dark}body{font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:39px;background:#0e1116;color:#e6e9ef}
-main{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0 0 18px}p{margin:8px 0;color:#aeb6c2}
-a,button{color:#7cc4ff}code{background:#1a1f27;padding:2px 6px;border-radius:5px;font-size:13px}
-.card{border:1px solid #262c36;border-radius:12px;padding:18px 20px;margin:16px 0;background:#141922}
-.ok{color:#63d68f}.warn{color:#ffc46b}</style></head><body><main>${body}</main></body></html>`
+<title>${escapeHtml(title)}</title><style>
+:root{color-scheme:light dark;--bg:#f6f8fb;--fg:#16181d;--muted:#5c6470;--card:#ffffff;--line:#dfe3ea;--accent:#1f5fd6;--ok:#1a7f37;--warn:#9a6700}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--fg:#e6e9ef;--muted:#aeb6c2;--card:#141922;--line:#262c36;--accent:#7cc4ff;--ok:#63d68f;--warn:#ffc46b}}
+*{box-sizing:border-box}
+body{margin:0;padding:32px 24px;background:var(--bg);color:var(--fg);font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:720px;margin:0 auto}h1{margin:0 0 16px;font-size:20px;line-height:28px}p{margin:8px 0;color:var(--muted)}
+a{color:var(--accent)}code{padding:2px 6px;border:1px solid var(--line);border-radius:5px;background:var(--card);font-size:13px}
+.card{margin:16px 0;padding:16px 20px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}
+</style></head><body><main>${body}</main></body></html>`
+}
+
+/** Render a login URL as an inline QR image the settings page can show. */
+function qrDataUri(text) {
+  const svg = renderSVG(text, { ecc: 'M', border: 2, pixelSize: 4 })
+  return `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`
 }
 
 function sessionView(session) {
@@ -356,7 +392,7 @@ function registerRoutes(ctx, config, client, state) {
     try {
       await handler(req, res)
     } catch (error) {
-      ctx.logger?.warn?.('workbuddy: route failed: %s', error instanceof Error ? error.stack ?? error.message : String(error))
+      ctx.logger?.warn?.(`workbuddy: route failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
       if (!res.headersSent) sendJson(res, 500, { error: String(error?.message ?? error) })
       else res.end()
     }
@@ -369,6 +405,7 @@ function registerRoutes(ctx, config, client, state) {
       sendJson(res, 200, {
         endpoint: client.endpoint,
         provider: config.provider,
+        displayName: config.displayName,
         catalogSize: WORKBUDDY_MODELS.length,
         ...sessionView(state.session),
       })
@@ -386,7 +423,16 @@ function registerRoutes(ctx, config, client, state) {
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
       if (started.error !== undefined) return sendJson(res, 502, { error: String(started.error?.message ?? started.error) })
-      if (url.searchParams.get('format') === 'json') return sendJson(res, 200, { authUrl: started.authUrl, state: started.state })
+      if (started.authUrl === undefined) {
+        return sendJson(res, 504, { error: 'WorkBuddy did not return a login URL in time' })
+      }
+      if (url.searchParams.get('format') === 'json') {
+        return sendJson(res, 200, {
+          authUrl: started.authUrl,
+          state: started.state,
+          qr: qrDataUri(started.authUrl),
+        })
+      }
       res.writeHead(302, { location: started.authUrl, 'cache-control': 'no-store' })
       res.end()
     }),
@@ -413,16 +459,17 @@ function registerRoutes(ctx, config, client, state) {
     path: ROUTE_BASE,
     handler: guarded(async (_req, res) => {
       const view = sessionView(state.session)
+      const account = view.account
       const status = view.loggedIn
-        ? `<p class="ok">已登录：${view.account?.nickname ?? ''} (${view.account?.uid ?? ''})</p>
-           <p>Access token 到期：${view.expiresAt ? new Date(view.expiresAt).toLocaleString('zh-CN') : '未知'}</p>`
+        ? `<p class="ok">已登录：${escapeHtml(account?.nickname ?? '')} (${escapeHtml(account?.uid ?? '')})</p>
+           <p>Access token 到期：${escapeHtml(view.expiresAt ? new Date(view.expiresAt).toLocaleString('zh-CN') : '未知')}</p>`
         : '<p class="warn">尚未登录 WorkBuddy。</p>'
       sendHtml(res, 200, page('WorkBuddy for DSH', `
         <h1>WorkBuddy → DeepSeek Harness</h1>
         <div class="card">${status}
-          <p>模型路由：<code>${config.provider}</code> · 端点：<code>${client.endpoint}/v2</code></p>
+          <p>模型路由：<code>${escapeHtml(config.provider)}</code> · 端点：<code>${escapeHtml(client.endpoint)}/v2</code></p>
           <p><a href="${ROUTE_BASE}/login" target="_blank" rel="noreferrer">登录 / 重新登录</a>（在新标签页打开）· <a href="${ROUTE_BASE}/status">状态 JSON</a></p>
-          <p>登录完成后，在 DSH 的模型选择器里选择 “${config.displayName}” 下的模型即可。</p>
+          <p>登录完成后，在 DSH 的模型选择器里选择 “${escapeHtml(config.displayName)}” 下的模型即可。</p>
         </div>`))
     }),
   }))

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="WorkBuddy models">
+  <defs>
+    <linearGradient id="wb-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b4cf0"/>
+      <stop offset="1" stop-color="#2f2a9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#wb-bg)"/>
+  <path d="M18 21h28a4 4 0 0 1 4 4v14a4 4 0 0 1-4 4H30l-9 7v-7h-3a4 4 0 0 1-4-4V25a4 4 0 0 1 4-4z"
+        fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#ffffff">
+    <circle cx="24" cy="32" r="2.2"/>
+    <circle cx="32" cy="32" r="2.2"/>
+    <circle cx="40" cy="32" r="2.2"/>
+  </g>
+  <circle cx="49" cy="15" r="3" fill="#ffd166"/>
+</svg>

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WorkBuddy Models",
+    "description": "Bring WorkBuddy account login and chat models into DeepSeek Harness: browser sign-in, automatic token rotation, and one pi-ai provider route."
+  }
+}
