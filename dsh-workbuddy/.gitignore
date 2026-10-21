@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+# Local login sessions must never be committed: they hold WorkBuddy tokens.
+session.json
+*.tmp

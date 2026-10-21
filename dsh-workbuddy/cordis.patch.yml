@@ -1,0 +1,14 @@
+# dsh-workbuddy bundle layer: one Host row that owns the WorkBuddy account
+# plane and installs the pi-ai provider route. `config` is spelled out so the
+# plugin always receives a concrete object before the first settings write.
+- insert:
+    - id: workbuddy
+      name: dsh-workbuddy
+      config:
+        endpoint: https://www.workbuddy.cn
+        provider: workbuddy
+        displayName: WorkBuddy
+        credentialRef: WORKBUDDY_ACCESS_TOKEN
+        autoRegisterProvider: true
+        syncProviderModels: false
+        refreshSkewMs: 600000

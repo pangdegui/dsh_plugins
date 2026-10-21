@@ -1,0 +1,40 @@
+{
+  "name": "dsh-workbuddy",
+  "version": "0.1.0",
+  "description": "WorkBuddy (腾讯 WorkBuddy) account login and model routes for DeepSeek Harness: browser login, token rotation, and a pi-ai provider that exposes WorkBuddy's chat models in DSH.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/unit.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "workbuddy",
+    "llm",
+    "openai-compatible"
+  ],
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "files": [
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ]
+}

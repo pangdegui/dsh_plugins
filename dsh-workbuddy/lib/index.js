@@ -1,0 +1,523 @@
+/**
+ * dsh-workbuddy — bring WorkBuddy's models into DeepSeek Harness.
+ *
+ * WorkBuddy (腾讯 WorkBuddy) is an Electron agent app whose model plane is an
+ * OpenAI-compatible gateway at `{endpoint}/v2/chat/completions`. Its account
+ * plane is a browser login ("account-scoped external link") that ends with a
+ * token poll, and its tokens refresh without a browser round-trip.
+ *
+ * This plugin owns that account plane and hands the model plane to DSH's
+ * existing pi-ai adapter:
+ *
+ *   1. **Login** — `/workbuddy/login` asks WorkBuddy for a login state, sends
+ *      the browser to the returned URL, and polls until the token arrives.
+ *      The session (access + refresh token, account, expiry) is persisted to
+ *      `$DSH_HOME/workbuddy/session.json` with owner-only permissions.
+ *
+ *   2. **Credential bridge** — the current access token is written to the
+ *      credential seam as `WORKBUDDY_ACCESS_TOKEN`, so no token ever appears
+ *      in profile YAML. Requests read the value per call, so a refresh is
+ *      visible to the very next model request.
+ *
+ *   3. **Provider** — ensures the `llm-pi-ai` row carries a `workbuddy`
+ *      provider route (`api: openai-completions`, `baseURL: {endpoint}/v2`)
+ *      whose model list is the catalog this plugin ships. That route is what
+ *      makes the models appear in DSH's model picker and routable by the
+ *      agent loop.
+ *
+ *   4. **Rotation** — a timer refreshes the token shortly before expiry, so a
+ *      long-lived DSH install keeps working without another login.
+ *
+ * Scope: host only. The plugin declares no client entry because the model
+ * picker already renders every pi-ai route; the login surface is a plain HTTP
+ * page served next to the app, deliberately script-free.
+ */
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import z from '@deepseek-ai/schemastery'
+import { WORKBUDDY_DEFAULT_MODEL, WORKBUDDY_MODELS } from './catalog.js'
+import { needsRefresh, providerConfig } from './provider.js'
+import { ANONYMOUS_HEADERS, WorkBuddyClient, normalizeToken } from './wb.js'
+
+export const name = 'workbuddy'
+
+/**
+ * No hard dependency: `webServer` is adopted through `ctx.inject`, and
+ * `credentials`, `configEditor`, `connection` and `loader` are looked up with
+ * `ctx.get`, so a profile that lacks one of them still loads the plugin
+ * instead of parking it on an unsatisfied injection.
+ */
+export const inject = []
+
+export const Config = z.object({
+  /** Account and model plane origin. The staging origin is the other valid value. */
+  endpoint: z.union([z.const('https://www.workbuddy.cn'), z.const('https://staging.workbuddy.cn')]).default('https://www.workbuddy.cn'),
+  /** Provider route name used for `provider:` selection and the pi-ai row. */
+  provider: z.string().default('workbuddy'),
+  /** Label shown in the model picker. */
+  displayName: z.string().default('WorkBuddy'),
+  /** Credential ref the access token is published under. */
+  credentialRef: z.string().default('WORKBUDDY_ACCESS_TOKEN'),
+  /** Install the `llm-pi-ai` provider row when the route is missing. */
+  autoRegisterProvider: z.boolean().default(true),
+  /**
+   * Rewrite an existing `workbuddy` route so a plugin upgrade refreshes its
+   * model list. Off by default so edits made in DSH's Models page survive a
+   * restart; delete the route from the profile patch to reinstall the catalog.
+   */
+  syncProviderModels: z.boolean().default(false),
+  /** Refresh this long before the access token expires. */
+  refreshSkewMs: z.number().default(10 * 60_000),
+})
+
+const ROUTE_BASE = '/workbuddy'
+const SESSION_VERSION = 1
+
+/** Home directory DSH itself resolves, so the file lands beside the profile. */
+function dshHome() {
+  const home = process.env.DSH_HOME
+  return home !== undefined && home.trim() !== '' ? home : path.join(os.homedir(), '.dsh')
+}
+
+function sessionPath() {
+  return path.join(dshHome(), 'workbuddy', 'session.json')
+}
+
+/** Persist the session atomically with owner-only permissions. */
+function saveSession(session) {
+  const file = sessionPath()
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify(session, undefined, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  fs.renameSync(temporary, file)
+  try {
+    fs.chmodSync(file, 0o600)
+  } catch {
+    /* best effort on filesystems without POSIX modes */
+  }
+}
+
+/** Read the persisted session, tolerating a missing or corrupt file. */
+function loadSession(logger) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sessionPath(), 'utf8'))
+    if (parsed?.version !== SESSION_VERSION || typeof parsed?.token?.accessToken !== 'string') return undefined
+    return parsed
+  } catch (error) {
+    if (error?.code !== 'ENOENT') logger?.warn?.('workbuddy: ignoring unreadable session file: %s', String(error))
+    return undefined
+  }
+}
+
+function deleteSession() {
+  try {
+    fs.rmSync(sessionPath(), { force: true })
+  } catch {
+    /* a missing file is the desired end state */
+  }
+}
+
+function sameProviderConfig(left, right) {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * One reconciliation per process is enough: the write is persisted, and a
+ * repeat would only reload `llm-pi-ai` again.
+ */
+let providerReconciled = false
+
+/**
+ * Write the `workbuddy` provider into the `llm-pi-ai` row through the Loader's
+ * own editor, which persists it in the profile patch and hot-reloads only that
+ * entry. Idempotent: an unchanged route writes nothing.
+ */
+async function reconcileProvider(ctx, config) {
+  if (providerReconciled) return true
+  const editor = ctx.get('configEditor')
+  if (editor === undefined || typeof editor.entries !== 'function' || typeof editor.edit !== 'function') return false
+  const entry = editor.entries().find((candidate) => candidate?.options?.id === 'llm-pi-ai')
+  if (entry === undefined) {
+    ctx.logger?.warn?.('workbuddy: no llm-pi-ai row in this profile; model route not installed')
+    return false
+  }
+  const wanted = providerConfig(config)
+  let skipped = false
+  try {
+    await editor.edit(entry, (current, inherited) => {
+      const providers = { ...(inherited?.providers ?? current?.providers ?? {}) }
+      const live = providers[config.provider]
+      if (live !== undefined && !config.syncProviderModels) {
+        skipped = true
+        return { ...inherited, providers }
+      }
+      const next = sameProviderConfig(live, wanted) ? providers : { ...providers, [config.provider]: wanted }
+      return { ...inherited, providers: next }
+    })
+    providerReconciled = true
+    if (skipped) {
+      ctx.logger?.info?.(
+        'workbuddy: pi-ai route "%s" already configured; leaving it untouched (set syncProviderModels to rewrite its model list)',
+        config.provider,
+      )
+    } else {
+      ctx.logger?.info?.('workbuddy: pi-ai route "%s" reconciled (%s models)', config.provider, WORKBUDDY_MODELS.length)
+    }
+    return true
+  } catch (error) {
+    ctx.logger?.warn?.('workbuddy: could not persist the pi-ai route: %s', error instanceof Error ? error.message : String(error))
+    return false
+  }
+}
+
+/** Publish the access token where pi-ai's `apiKeyEnv` reads it. */
+async function publishToken(ctx, config, accessToken) {
+  const credentials = ctx.get('credentials')
+  if (credentials === undefined || typeof credentials.set !== 'function') {
+    ctx.logger?.warn?.('workbuddy: credential store unavailable; requests will fail with MISSING_CREDENTIAL')
+    return false
+  }
+  try {
+    await credentials.set(config.credentialRef, accessToken)
+    return true
+  } catch (error) {
+    ctx.logger?.warn?.('workbuddy: could not store the access token: %s', error instanceof Error ? error.message : String(error))
+    return false
+  }
+}
+
+async function clearPublishedToken(ctx, config) {
+  const credentials = ctx.get('credentials')
+  if (credentials === undefined || typeof credentials.unset !== 'function') return
+  try {
+    await credentials.unset(config.credentialRef)
+  } catch (error) {
+    ctx.logger?.warn?.('workbuddy: could not remove the stored token: %s', error instanceof Error ? error.message : String(error))
+  }
+}
+
+// --- login orchestration -----------------------------------------------------
+
+/** The single login this process is currently polling, if any. */
+let pendingLogin
+
+function startLogin(ctx, client, config, state) {
+  if (pendingLogin !== undefined) {
+    const age = Date.now() - pendingLogin.startedAt
+    // Reuse a recent flow: the user may already have the tab open.
+    if (age < 10 * 60_000) return pendingLogin
+    pendingLogin.controller.abort(new Error('superseded'))
+    pendingLogin = undefined
+  }
+
+  const controller = new AbortController()
+  const flow = {
+    startedAt: Date.now(),
+    state: undefined,
+    authUrl: undefined,
+    result: undefined,
+    error: undefined,
+    controller,
+    ready: undefined,
+  }
+  flow.ready = (async () => {
+    try {
+      const loginState = await client.createLoginState(controller.signal)
+      flow.state = loginState.state
+      flow.authUrl = loginState.authUrl
+      ctx.logger?.info?.('workbuddy: login required, open %s', loginState.authUrl)
+      const token = await client.waitForLogin(loginState.state, { signal: controller.signal })
+      const account = await client.fetchAccount(token.accessToken).catch((error) => {
+        ctx.logger?.warn?.('workbuddy: login succeeded but account lookup failed: %s', String(error))
+        return undefined
+      })
+      const session = {
+        version: SESSION_VERSION,
+        endpoint: client.endpoint,
+        token,
+        account: account ?? undefined,
+        savedAt: Date.now(),
+      }
+      saveSession(session)
+      state.session = session
+      await publishToken(ctx, config, token.accessToken)
+      flow.result = session
+      ctx.logger?.info?.('workbuddy: login complete for %s', account?.uid ?? '(unknown)')
+      if (pendingLogin === flow) pendingLogin = undefined
+    } catch (error) {
+      flow.error = error
+      if (pendingLogin === flow) pendingLogin = undefined
+      if (!controller.signal.aborted) ctx.logger?.warn?.('workbuddy: login failed: %s', String(error))
+    }
+  })()
+
+  pendingLogin = flow
+  return flow
+}
+
+/** Refresh in the background; returns the token that should now be published. */
+async function refreshSession(ctx, config, session, client) {
+  if (typeof session?.token?.refreshToken !== 'string' || session.token.refreshToken === '') {
+    ctx.logger?.warn?.('workbuddy: session has no refresh token; run /workbuddy/login again')
+    return undefined
+  }
+  try {
+    const token = await client.refreshToken(session.token.refreshToken)
+    // A refresh answer may omit the refresh token when the provider keeps the
+    // existing one; never trade a working refresh token for `undefined`.
+    if (token.refreshToken === undefined) token.refreshToken = session.token.refreshToken
+    if (token.refreshExpiresAt === undefined) token.refreshExpiresAt = session.token.refreshExpiresAt
+    const next = { ...session, token, savedAt: Date.now() }
+    saveSession(next)
+    await publishToken(ctx, config, token.accessToken)
+    ctx.logger?.info?.('workbuddy: access token refreshed, expires %s', new Date(token.expiresAt ?? 0).toISOString())
+    return next
+  } catch (error) {
+    ctx.logger?.warn?.('workbuddy: token refresh failed: %s', error instanceof Error ? error.message : String(error))
+    return undefined
+  }
+}
+
+// --- HTTP surface ------------------------------------------------------------
+
+function requestRejection(ctx, req) {
+  const connection = ctx.get('connection')
+  if (connection === undefined || typeof connection.requestRejection !== 'function') return undefined
+  try {
+    return connection.requestRejection(req)
+  } catch {
+    return 403
+  }
+}
+
+function sendJson(res, status, body) {
+  const text = JSON.stringify(body, undefined, 2)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(text),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(text)
+}
+
+function sendHtml(res, status, html) {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(html),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(html)
+}
+
+function page(title, body) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title><style>
+:root{color-scheme:light dark}body{font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:39px;background:#0e1116;color:#e6e9ef}
+main{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0 0 18px}p{margin:8px 0;color:#aeb6c2}
+a,button{color:#7cc4ff}code{background:#1a1f27;padding:2px 6px;border-radius:5px;font-size:13px}
+.card{border:1px solid #262c36;border-radius:12px;padding:18px 20px;margin:16px 0;background:#141922}
+.ok{color:#63d68f}.warn{color:#ffc46b}</style></head><body><main>${body}</main></body></html>`
+}
+
+function sessionView(session) {
+  if (session === undefined) return { loggedIn: false }
+  const token = session.token ?? {}
+  return {
+    loggedIn: true,
+    account: session.account === undefined ? undefined : {
+      uid: session.account.uid,
+      nickname: session.account.nickname,
+      uin: session.account.uin,
+      type: session.account.type,
+    },
+    expiresAt: token.expiresAt,
+    expiresInSeconds: Number.isFinite(token.expiresAt) ? Math.round((token.expiresAt - Date.now()) / 1000) : undefined,
+    expired: Number.isFinite(token.expiresAt) ? token.expiresAt <= Date.now() : undefined,
+    hasRefreshToken: typeof token.refreshToken === 'string' && token.refreshToken !== '',
+    savedAt: session.savedAt,
+  }
+}
+
+function registerRoutes(ctx, config, client, state) {
+  const disposers = []
+
+  const guarded = (handler) => async (req, res) => {
+    const rejection = requestRejection(ctx, req)
+    if (rejection === 403) return sendJson(res, 403, { error: 'host/origin refused' })
+    if (rejection === 401) return sendJson(res, 401, { error: 'sign in to the DSH web app first' })
+    try {
+      await handler(req, res)
+    } catch (error) {
+      ctx.logger?.warn?.('workbuddy: route failed: %s', error instanceof Error ? error.stack ?? error.message : String(error))
+      if (!res.headersSent) sendJson(res, 500, { error: String(error?.message ?? error) })
+      else res.end()
+    }
+  }
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/status`,
+    handler: guarded(async (_req, res) => {
+      sendJson(res, 200, {
+        endpoint: client.endpoint,
+        provider: config.provider,
+        catalogSize: WORKBUDDY_MODELS.length,
+        ...sessionView(state.session),
+      })
+    }),
+  }))
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/login`,
+    handler: guarded(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const started = startLogin(ctx, client, config, state)
+      // Wait only for the auth URL, never for the browser login itself.
+      for (let i = 0; i < 100 && started.authUrl === undefined && started.error === undefined; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      if (started.error !== undefined) return sendJson(res, 502, { error: String(started.error?.message ?? started.error) })
+      if (url.searchParams.get('format') === 'json') return sendJson(res, 200, { authUrl: started.authUrl, state: started.state })
+      res.writeHead(302, { location: started.authUrl, 'cache-control': 'no-store' })
+      res.end()
+    }),
+  }))
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/logout`,
+    handler: guarded(async (req, res) => {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'use POST' })
+      if (pendingLogin !== undefined) {
+        pendingLogin.controller.abort(new Error('logout'))
+        pendingLogin = undefined
+      }
+      state.session = undefined
+      deleteSession()
+      await clearPublishedToken(ctx, config)
+      sendJson(res, 200, { loggedIn: false })
+    }),
+  }))
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: ROUTE_BASE,
+    handler: guarded(async (_req, res) => {
+      const view = sessionView(state.session)
+      const status = view.loggedIn
+        ? `<p class="ok">已登录：${view.account?.nickname ?? ''} (${view.account?.uid ?? ''})</p>
+           <p>Access token 到期：${view.expiresAt ? new Date(view.expiresAt).toLocaleString('zh-CN') : '未知'}</p>`
+        : '<p class="warn">尚未登录 WorkBuddy。</p>'
+      sendHtml(res, 200, page('WorkBuddy for DSH', `
+        <h1>WorkBuddy → DeepSeek Harness</h1>
+        <div class="card">${status}
+          <p>模型路由：<code>${config.provider}</code> · 端点：<code>${client.endpoint}/v2</code></p>
+          <p><a href="${ROUTE_BASE}/login" target="_blank" rel="noreferrer">登录 / 重新登录</a>（在新标签页打开）· <a href="${ROUTE_BASE}/status">状态 JSON</a></p>
+          <p>登录完成后，在 DSH 的模型选择器里选择 “${config.displayName}” 下的模型即可。</p>
+        </div>`))
+    }),
+  }))
+
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose()
+      } catch {
+        /* disposing twice is harmless */
+      }
+    }
+  }
+}
+
+// --- plugin ------------------------------------------------------------------
+
+export function apply(ctx, config) {
+  const resolved = {
+    endpoint: config?.endpoint === 'https://staging.workbuddy.cn' ? 'https://staging.workbuddy.cn' : 'https://www.workbuddy.cn',
+    provider: typeof config?.provider === 'string' && config.provider.trim() !== '' ? config.provider.trim() : 'workbuddy',
+    displayName: typeof config?.displayName === 'string' && config.displayName.trim() !== '' ? config.displayName.trim() : 'WorkBuddy',
+    credentialRef:
+      typeof config?.credentialRef === 'string' && config.credentialRef.trim() !== '' ? config.credentialRef.trim() : 'WORKBUDDY_ACCESS_TOKEN',
+    autoRegisterProvider: config?.autoRegisterProvider !== false,
+    syncProviderModels: config?.syncProviderModels === true,
+    refreshSkewMs: Number.isFinite(config?.refreshSkewMs) ? Math.max(0, config.refreshSkewMs) : 10 * 60_000,
+  }
+  const client = new WorkBuddyClient({ endpoint: resolved.endpoint })
+  const loaded = loadSession(ctx.logger)
+  const state = { session: loaded?.endpoint === resolved.endpoint ? loaded : undefined }
+
+  // Publish whatever we already have, then keep it fresh. Both steps are
+  // effects: they dispose with the plugin and never write during teardown.
+  ctx.effect(() => {
+    let cancelled = false
+    void (async () => {
+      const session = state.session
+      if (session !== undefined && typeof session.token?.accessToken === 'string') {
+        await publishToken(ctx, resolved, session.token.accessToken)
+      }
+      if (cancelled) return
+      if (!resolved.autoRegisterProvider) return
+      const loader = ctx.get('loader')
+      if (loader !== undefined && typeof loader.await === 'function') {
+        try {
+          await loader.await()
+        } catch {
+          /* a failed fiber is reported by the boot audit */
+        }
+      }
+      if (!cancelled) await reconcileProvider(ctx, resolved)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, 'workbuddy: bootstrap')
+
+  // Rotation: check every minute, refresh when inside the skew window.
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      void (async () => {
+        const session = state.session
+        if (session === undefined) return
+        if (!needsRefresh(session.token, resolved.refreshSkewMs)) return
+        const next = await refreshSession(ctx, resolved, session, client)
+        if (next !== undefined) state.session = next
+      })()
+    }, 60_000)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, 'workbuddy: rotation')
+
+  ctx.inject(['webServer'], (webCtx) => {
+    webCtx.effect(() => registerRoutes(webCtx, resolved, client, state), 'workbuddy: routes')
+  })
+
+  // A login poll owns its own timers; abort it with the plugin so a stopped
+  // profile cannot keep waiting on a browser tab nobody will finish.
+  ctx.effect(() => () => {
+    if (pendingLogin !== undefined) {
+      pendingLogin.controller.abort(new Error('plugin disposed'))
+      pendingLogin = undefined
+    }
+  }, 'workbuddy: pending-login')
+}
+
+/** Exposed for tests: pure pieces plus the login orchestrator. */
+export const internals = {
+  WorkBuddyClient,
+  ANONYMOUS_HEADERS,
+  WORKBUDDY_MODELS,
+  WORKBUDDY_DEFAULT_MODEL,
+  providerConfig,
+  needsRefresh,
+  normalizeToken,
+  startLogin,
+}
