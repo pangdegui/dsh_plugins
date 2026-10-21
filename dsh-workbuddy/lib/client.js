@@ -82,6 +82,7 @@ window.__ModuleLoader__.load({
       guardModeOff: '关闭（原样发送）',
       guardModePrepend: '在开头增加一句',
       guardModeStrip: '删除身份行',
+    guardModeReplace: '删除并换成 WorkBuddy 介绍',
       guardPrefix: '前置文本',
       guardPrefixHint: '只在「在开头增加一句」时使用；留空会恢复默认文本。',
       guardSave: '保存',
@@ -136,6 +137,7 @@ window.__ModuleLoader__.load({
       guardModeOff: 'Off (send as is)',
       guardModePrepend: 'Add one line in front',
       guardModeStrip: 'Remove the identity line',
+    guardModeReplace: 'Replace it with a WorkBuddy intro',
       guardPrefix: 'Prefix text',
       guardPrefixHint: 'Used only by “Add one line in front”; clearing it restores the default.',
       guardSave: 'Save',
@@ -612,10 +614,11 @@ window.__ModuleLoader__.load({
                   h('option', { key: 'off', value: 'off' }, t('guardModeOff')),
                   h('option', { key: 'prepend', value: 'prepend' }, t('guardModePrepend')),
                   h('option', { key: 'strip', value: 'strip' }, t('guardModeStrip')),
+                  h('option', { key: 'replace', value: 'replace' }, t('guardModeReplace')),
                 ],
               ),
             ]),
-            guardMode === 'prepend'
+            guardMode === 'prepend' || guardMode === 'replace'
               ? h('label', { key: 'prefix', className: 'wb_field' }, [
                   h('span', { key: 'k', className: 'wb_hint' }, t('guardPrefix')),
                   h('input', {

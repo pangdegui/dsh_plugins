@@ -89,7 +89,7 @@ export const Config = z.object({
    * front of the first section, keeping every section. `strip` drops the
    * identity section entirely, so the prompt opens with the deployment persona.
    */
-  promptGuard: z.union([z.const('off'), z.const('prepend'), z.const('strip')]).default('prepend'),
+  promptGuard: z.union([z.const('off'), z.const('prepend'), z.const('strip'), z.const('replace')]).default('prepend'),
   /** One line inserted at the very start of the prompt when `promptGuard` is `prepend`. */
   promptPrefix: z.string().default(DEFAULT_PROMPT_PREFIX),
   /**
@@ -571,7 +571,7 @@ function registerRoutes(ctx, config, client, state) {
       }
       const mode = normalizePromptGuard(body.mode, null)
       if (mode === null) {
-        return sendJson(res, 400, { error: 'mode 必须是 off、prepend 或 strip' })
+        return sendJson(res, 400, { error: 'mode 必须是 off、prepend、strip 或 replace' })
       }
       // A blank prefix means "use the shipped default", not "send nothing":
       // `prepend` with an empty line would be indistinguishable from `off`.

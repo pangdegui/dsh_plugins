@@ -23,6 +23,8 @@
  *     the harness identity survives, just not at offset zero.
  *   - `strip` removes the identity section outright; the prompt then starts
  *     with the deployment persona, which the gateway also accepts.
+ *   - `replace` does the same removal and puts the configured line in its
+ *     place, so the prompt opens with the deployment's own introduction.
  */
 
 /** The sentence DSH renders first in every system prompt. */
@@ -32,7 +34,7 @@ export const HARNESS_IDENTITY = 'You are an AI agent powered by DeepSeek Harness
 export const DEFAULT_PROMPT_PREFIX = 'This session is served through WorkBuddy.'
 
 /** The modes a profile may name. */
-export const PROMPT_GUARD_MODES = Object.freeze(['off', 'prepend', 'strip'])
+export const PROMPT_GUARD_MODES = Object.freeze(['off', 'prepend', 'strip', 'replace'])
 
 /** The section name DSH gives its identity sentence. */
 const IDENTITY_SECTION = 'harness:identity'
@@ -127,6 +129,15 @@ export function guardAssembly(settings, assembly, provider) {
     const kept = sections.filter((section) => !isIdentitySection(section))
     if (kept.length === 0 || kept.length === sections.length) return assembly
     return { ...assembly, sections: kept }
+  }
+
+  if (mode === 'replace') {
+    const kept = sections.filter((section) => !isIdentitySection(section))
+    if (kept.length === sections.length) return assembly
+    return {
+      ...assembly,
+      sections: [{ name: 'workbuddy:prompt-guard', text: normalizePromptPrefix(settings?.promptPrefix) }, ...kept],
+    }
   }
 
   const prefixed = prependPrefix(sections, normalizePromptPrefix(settings?.promptPrefix))

@@ -132,9 +132,24 @@ assert.equal(stripped.sections.length, 1)
 assert.equal(stripped.sections[0].name, 'persona')
 assert.ok(!stripped.sections[0].text.includes('DeepSeek Harness'))
 
+// replace swaps the identity section for the configured introduction.
+const replaced = guardAssembly(
+  { ...settings, promptGuard: 'replace', promptPrefix: 'You are WorkBuddy, a coding agent.' },
+  makeAssembly(),
+  'workbuddy',
+)
+assert.equal(replaced.sections.length, 2)
+assert.equal(replaced.sections[0].text, 'You are WorkBuddy, a coding agent.')
+assert.equal(replaced.sections[1].name, 'persona')
+assert.ok(!replaced.sections.some((section) => section.name === 'harness:identity'))
+
+// replacing an assembly that carries no identity section leaves it alone
+// (checked with the other no-op cases below).
+
 // stripping an assembly that has no identity section leaves it alone.
 const personaOnly = { sections: [{ name: 'persona', text: 'You are a coding agent.' }], variables: {} }
 assert.equal(guardAssembly({ ...settings, promptGuard: 'strip' }, personaOnly, 'workbuddy'), personaOnly)
+assert.equal(guardAssembly({ ...settings, promptGuard: 'replace' }, personaOnly, 'workbuddy'), personaOnly)
 
 // an empty assembly is never turned into an empty prompt by `strip`.
 const empty = { sections: [], variables: {} }
