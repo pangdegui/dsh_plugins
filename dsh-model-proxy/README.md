@@ -91,8 +91,27 @@ DeepSeek Harness 的**模型代理**插件：填一个代理地址，勾选要�
 包装成 bundle 时，`dsh.bundle.patch` 指向本包的 `cordis.patch.yml`，加载器会
 自己插入这一行。
 
-浏览器半边在 `package.json` 的 `dsh.client` 里声明（`platform: web`），由
+浏览器半边在 `package.json` 的 `dsh.client` 里声明：`platform: web`、
+`immediately: true`（打开设置时不必再等一次按需加载）、`inject` 里列出
+`ui-settings` 和 `locale`，只用来决定加载顺序。模块由
 `window.__ModuleLoader__.load` 加载，**不需要构建步骤**。
+
+插件清单还带 `dsh.manifestVersion: 1`、`locale/en.json` 与 `locale/zh.json`
+（`meta.title` / `meta.description`）和 `icon.svg`，所以「设置 → 插件」里显示
+的是本插件自己的名称、说明和图标，而不是包名和通用图标。
+
+### 客户端代码的当前写法
+
+- **不 import 任何 Harness Client 包**（包括
+  `@deepseek-ai/dsh-client-ui-primitives`）。那些包会随版本改 API，且一个
+  组件抛错就会让整个 slot 条目空白。按钮、输入框、勾选框和开关都在本文件里
+  用普通 React 元素写，并照抄宿主的行为：`role="switch"` + `aria-checked`、
+  可点击的整行标签、`focus-visible` 焦点环。
+- **只用主题 token**：`--dsw-alias-border-l1/l2`、`--dsw-alias-bg-base/layer-1/2`、
+  `--dsw-alias-brand-primary`、`--dsw-alias-label-*`、`--dsw-alias-state-*`。
+  样式表在 `apply` 里插入、由 disposer 删除，类名统一加 `dmp_` 前缀。
+- **文案走 locale 服务**：`modelProxy` 命名空间的字典在 `apply` 里注册，导航
+  标签是 thunk，切换语言时跟着变。
 
 ### 从旧版本升级
 
@@ -126,7 +145,7 @@ Host 路由自己做校验和 `configEditor` 落盘，浏览器半边只负责�
 | 路径 | 方法 | 用途 |
 |---|---|---|
 | `/model-proxy` | GET | 303 跳到 `/`（旧书签兜底） |
-| `/model-proxy/status` | GET | 当前配置、传输层状态、最近决策 |
+| `/model-proxy/status` | GET | 当前配置与传输层状态 |
 | `/model-proxy/models` | GET | 本部署提供的模型，按 provider 分组 |
 | `/model-proxy/apply` | POST | 写入配置（JSON） |
 
@@ -144,7 +163,7 @@ node test/rules.test.mjs      # 26  passed
 node test/transport.test.mjs  # 12  passed
 node test/scope.test.mjs      # 3   passed
 node test/plugin.test.mjs     # 18  passed
-node test/client.test.mjs     # 12  passed
+node test/client.test.mjs     # 13  passed
 ```
 
 `config` 覆盖存储形状、旧版迁移、编译成规则、校验；`rules` 是纯匹配逻辑；

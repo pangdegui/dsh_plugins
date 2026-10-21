@@ -22,7 +22,7 @@ export const PANEL_PATH = '/model-proxy'
 /** Where the settings page writes a new configuration. */
 export const APPLY_PATH = '/model-proxy/apply'
 
-/** The current configuration, transport state and recent decisions, as JSON. */
+/** The current configuration and transport state, as JSON. */
 export const STATUS_PATH = '/model-proxy/status'
 
 /**

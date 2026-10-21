@@ -173,9 +173,13 @@ await test('the status route carries what the settings page renders', async () =
   assert.equal(response.status, 200)
   // The browser half reads exactly these keys; a rename here silently blanks a
   // field in the UI, so hold the wire shape still.
-  for (const key of ['transport', 'problems', 'active', 'proxy', 'models', 'log', 'ruleCount', 'recent']) {
-    assert.ok(Object.hasOwn(JSON.parse(response.body), key), `status must expose ${key}`)
+  const body = JSON.parse(response.body)
+  for (const key of ['transport', 'problems', 'active', 'proxy', 'models', 'log', 'ruleCount']) {
+    assert.ok(Object.hasOwn(body, key), `status must expose ${key}`)
   }
+  // The page renders the current configuration only; no decision history is
+  // kept for it.
+  assert.ok(!Object.hasOwn(body, 'recent'), 'status must not carry a decision history')
 })
 
 await test('status reports the configured proxy and the models it covers', async () => {

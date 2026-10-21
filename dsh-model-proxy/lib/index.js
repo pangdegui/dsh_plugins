@@ -47,9 +47,6 @@ export { pluginName as name }
  */
 export const inject = []
 
-/** Roll-up of the last few routing decisions, for the settings page. */
-const RECENT_LIMIT = 20
-
 // --- HTTP helpers ------------------------------------------------------------
 
 function sendJson(res, status, body) {
@@ -128,20 +125,20 @@ function configFromJson(body) {
  */
 export function apply(ctx, rawConfig) {
   let config = normalizeConfig(rawConfig)
-  const recent = []
   /** Set while a save is in flight, so the page never reads a half-applied state. */
   let applying = false
 
   const transportReady = { ok: false, problems: ['transport not loaded yet'] }
 
   /**
-   * Append one decision to the recent list the page shows.
+   * Write one routing decision to the Host log when the user asked for it.
    *
-   * @param {string} text the line to keep.
+   * This is a diagnostic switch, not a history: nothing is retained for the
+   * settings page, which renders only the current configuration.
+   *
+   * @param {string} text the line to log.
    */
-  const remember = (text) => {
-    recent.push(text)
-    if (recent.length > RECENT_LIMIT) recent.shift()
+  const trace = (text) => {
     if (config.log) ctx.logger?.info?.(`model-proxy: ${text}`)
   }
 
@@ -196,7 +193,7 @@ export function apply(ctx, rawConfig) {
   const decide = (options) => {
     const decision = decideRoute({ rules, proxies: {}, provider: options?.provider, model: options?.model })
     const detail = decision.kind === 'proxy' ? ` -> ${decision.url}` : ''
-    remember(`${decision.kind}${detail} (${decision.from}) ${options?.model ?? ''}`.trim())
+    trace(`${decision.kind}${detail} (${decision.from}) ${options?.model ?? ''}`.trim())
     return decision
   }
 
@@ -314,7 +311,6 @@ export function apply(ctx, rawConfig) {
           transport: transportReady.ok,
           problems: transportReady.problems,
           active: describeActive(),
-          recent,
           ...viewOf(),
         })
         return
@@ -362,9 +358,9 @@ export function apply(ctx, rawConfig) {
             // to see it work — but say plainly that it will not survive a restart.
             config = submitted
             rules = toRules(config)
-            remember(`config applied in memory only: rules=${String(rules.length)}`)
+            trace(`config applied in memory only: rules=${String(rules.length)}`)
           } else {
-            remember(`config saved: rules=${String(toRules(submitted).length)}`)
+            trace(`config saved: rules=${String(toRules(submitted).length)}`)
           }
           sendJson(res, outcome.ok ? 202 : 200, {
             ok: true,

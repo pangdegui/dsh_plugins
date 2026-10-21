@@ -1,42 +1,34 @@
 /**
  * dsh-model-proxy — browser half.
  *
- * A **Settings section** of its own (设置 → 模型代理), not a bare route. The
- * panel that shipped first was a routable page you had to know the URL for;
- * a proxy is ordinary configuration and belongs where configuration lives.
- *
- * The page asks the one question the plugin actually answers:
+ * A **Settings section** of its own (设置 → 模型代理). The page asks the two
+ * questions the plugin actually answers:
  *
  *   1. **一个代理** — the address every routed request goes through.
  *   2. **哪些模型生效** — a tick list of the models this deployment offers.
  *
- * The first version of this page exposed the whole rule language (named proxies,
- * provider/host selectors, a per-rule target) as two small textareas. That is a
- * configuration file wearing a form's clothes: it makes the common case — "send
- * these models through my proxy" — the hardest one to type. The stored shape is
- * now `{ proxy, models, log }` (see `lib/config.js`), and the rules it compiles
- * to stay an implementation detail.
+ * The stored shape is `{ proxy, models, log }` (see `lib/config.js`), and the
+ * rules it compiles to stay an implementation detail. The page only reads JSON
+ * from the Host routes and posts a new config back.
  *
- * Two decisions worth knowing:
+ * Current client-plugin conventions this file follows:
  *
- *   - **Own section, not a tab inside an existing one.** `settings.section` is
- *     an open `list` slot with `replaceRisk: none`, so a plugin may add a nav
- *     entry. The shipped "Models" and "Plugins" sections are single components
- *     owned by official packages: a third party can add a *tab* under Plugins
- *     but cannot contribute a form to Models, and Plugins is documented as the
- *     list of plugins the deployment *ships*, which this is not.
- *
- *   - **Plain factory, no build step.** The client module system loads this file
- *     through `window.__ModuleLoader__.load`, so requirements are the ones the
- *     composition already provides (`react`, `@deepseek-ai/dsh-client-ui-primitives`)
- *     and the package needs no bundler. That is what keeps the plugin
- *     installable straight from git.
- *
- * The page talks to this plugin's own Host routes rather than to
- * `remote.settings`: `settings/describe` only lists entries whose plugin exports
- * a `Config` schema, and a model list is not a scalar field a generated form can
- * edit. The Host routes already validate and persist through `configEditor`, so
- * the browser half only has to render fields and read JSON.
+ *   - **Bundle protocol.** One lazy factory registered under the package name
+ *     via `window.__ModuleLoader__.load`. React comes from the browser module
+ *     table; the package needs no bundler and no CDN script.
+ *   - **No Harness Client packages.** Controls are plain React elements that
+ *     copy the host's markup, sizing and behavior (`role="switch"` with
+ *     `aria-checked`, labelled inputs, focus-visible rings). Importing
+ *     `@deepseek-ai/dsh-client-ui-primitives` is what the current guidance
+ *     rules out: those packages change without notice and a throwing component
+ *     blanks the slot entry.
+ *   - **Theme tokens only.** The stylesheet below references the current
+ *     `--dsw-alias-*` palette (`border-l1`, `bg-layer-1`, `brand-primary`,
+ *     `state-*`), so the page follows light/dark and any re-themed deployment.
+ *     The stylesheet is inserted from `apply` and removed by its disposer.
+ *   - **Locale through the service.** Dictionaries are registered under the
+ *     `modelProxy` namespace and the nav label is a thunk, so both follow a
+ *     live language switch without re-registering the section.
  */
 
 window.__ModuleLoader__.load({
@@ -47,21 +39,9 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useState } = React
 
-    let primitives = null
-    try {
-      primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-    } catch {
-      primitives = null
-    }
-    const Button = primitives?.Button
-    const Checkbox = primitives?.Checkbox
-    const Input = primitives?.Input
-    const Switch = primitives?.Switch
-    const StateDot = primitives?.StateDot
-
     const inject = ['slots', 'locale']
 
-    /** Nav identity: one id for the settings section and its dictionary. */
+    /** Nav identity: one id for the settings section and its dictionaries. */
     const SECTION_ID = 'model-proxy'
     const NS = 'modelProxy'
 
@@ -69,14 +49,8 @@ window.__ModuleLoader__.load({
     const APPLY_PATH = '/model-proxy/apply'
     const MODELS_PATH = '/model-proxy/models'
 
-    /** Matches the `--dsw-radius-*` scale the rest of Settings uses. */
-    const RADIUS = 'var(--dsw-radius-md)'
-    const LINE = 'var(--dsw-alias-line-secondary)'
-    const LABEL = 'var(--dsw-alias-label-primary)'
-    const MUTED = 'var(--dsw-alias-label-secondary)'
-    const ERROR = 'var(--dsw-alias-state-error-primary)'
-    const SUCCESS = 'var(--dsw-alias-state-success-primary)'
-    const HOVER = 'var(--dsw-alias-interactive-bg-hover)'
+    /** Marks the one stylesheet this module owns, so a reload never stacks. */
+    const STYLE_ID = 'dsh-model-proxy'
 
     // --- copy ------------------------------------------------------------------
 
@@ -112,6 +86,7 @@ window.__ModuleLoader__.load({
       dirty: '有未保存的改动',
       unchanged: '没有改动',
 
+      loadFailed: '读取配置失败：{error}',
       scopeNote: '作用范围仅限模型对话。模型发现、网页抓取、插件安装与子进程都不经此代理。',
 
       sectionStatus: '状态',
@@ -123,8 +98,6 @@ window.__ModuleLoader__.load({
       statusRouting: '生效模型',
       statusRoutingCount: '{count} 个',
       statusRoutingNone: '无',
-      sectionRecent: '最近决策',
-      noRecent: '还没有请求。',
       problems: '配置问题',
     }
 
@@ -161,6 +134,7 @@ window.__ModuleLoader__.load({
       dirty: 'Unsaved changes',
       unchanged: 'No changes',
 
+      loadFailed: 'Could not load the configuration: {error}',
       scopeNote:
         'Scope is model conversations only. Model discovery, web fetch, plugin installs and subprocesses do not use this proxy.',
 
@@ -173,108 +147,79 @@ window.__ModuleLoader__.load({
       statusRouting: 'Models routed',
       statusRoutingCount: '{count}',
       statusRoutingNone: 'none',
-      sectionRecent: 'Recent decisions',
-      noRecent: 'No requests yet.',
       problems: 'Configuration problems',
     }
 
-    // --- styling ---------------------------------------------------------------
-    // Inline styles rather than a stylesheet: this file is loaded as a plain
-    // factory with no CSS pipeline, and the handful of rules here are not worth
-    // injecting a <style> tag for. Colours come from the `--dsw-*` tokens so the
-    // page follows the user's theme without knowing what the theme is.
+    // --- styles ----------------------------------------------------------------
+    // One plugin-owned sheet, keyed to the current theme tokens. Class names are
+    // prefixed so they cannot collide with the host or another plugin.
 
-    const pageStyle = { display: 'flex', flexDirection: 'column', gap: 24 }
-    const titleStyle = { margin: 0, fontSize: 17, fontWeight: 600, color: LABEL }
-    const introStyle = { margin: '8px 0 0', fontSize: 13, lineHeight: '20px', color: MUTED }
-    const groupStyle = { display: 'flex', flexDirection: 'column', gap: 10 }
-    const groupTitleStyle = { margin: 0, fontSize: 13, fontWeight: 600, color: LABEL }
-    const hintStyle = { margin: 0, fontSize: 12, lineHeight: '18px', color: MUTED }
-    const errorStyle = { margin: 0, fontSize: 12, lineHeight: '18px', color: ERROR }
-    const successStyle = { margin: 0, fontSize: 12, lineHeight: '18px', color: SUCCESS }
+    const CSS = `
+.dmp_page { display:flex; flex-direction:column; gap:24px; color:var(--dsw-alias-label-primary); font-size:13px; line-height:20px; }
+.dmp_header { display:flex; flex-direction:column; gap:6px; }
+.dmp_title { margin:0; font-size:16px; font-weight:600; line-height:24px; }
+.dmp_section { display:flex; flex-direction:column; gap:10px; }
+.dmp_sectionHead { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.dmp_label { margin:0; font-size:13px; font-weight:600; line-height:20px; }
+.dmp_hint { margin:0; font-size:12px; line-height:18px; color:var(--dsw-alias-label-secondary); }
+.dmp_error { margin:0; font-size:12px; line-height:18px; color:var(--dsw-alias-state-error-primary); }
+.dmp_success { margin:0; font-size:12px; line-height:18px; color:var(--dsw-alias-state-success-primary); }
+.dmp_input { box-sizing:border-box; width:100%; height:32px; padding:0 10px; border:1px solid var(--dsw-alias-border-l1); border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-base); color:var(--dsw-alias-label-primary); font:inherit; font-size:13px; }
+.dmp_input::placeholder { color:var(--dsw-alias-label-secondary); }
+.dmp_input:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-1px; border-color:transparent; }
+.dmp_tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dmp_tools .dmp_input { flex:1 1 220px; width:auto; }
+.dmp_textButton { padding:3px 8px; border:none; border-radius:var(--dsw-radius-md); background:transparent; color:var(--dsw-alias-brand-primary); font:inherit; font-size:12px; cursor:pointer; }
+.dmp_textButton:hover:not(:disabled) { background:var(--dsw-alias-bg-layer-2); }
+.dmp_textButton:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }
+.dmp_textButton:disabled { opacity:.5; cursor:default; }
+.dmp_list { display:flex; flex-direction:column; max-height:260px; overflow-y:auto; border:1px solid var(--dsw-alias-border-l1); border-radius:var(--dsw-radius-md); padding:6px 8px; background:var(--dsw-alias-bg-layer-1); }
+.dmp_group { margin:10px 0 2px; font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--dsw-alias-label-secondary); }
+.dmp_modelRow { display:flex; align-items:center; gap:10px; margin:0 -8px; padding:6px 8px; border-radius:var(--dsw-radius-md); cursor:pointer; font-size:13px; }
+.dmp_modelRow:hover { background:var(--dsw-alias-bg-layer-2); }
+.dmp_check { flex:none; width:14px; height:14px; margin:0; accent-color:var(--dsw-alias-brand-primary); }
+.dmp_modelName { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dmp_modelId { font-size:12px; color:var(--dsw-alias-label-secondary); }
+.dmp_rowBetween { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.dmp_stack { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.dmp_switch { position:relative; flex:none; width:34px; height:20px; padding:0; border:1px solid var(--dsw-alias-border-l2); border-radius:999px; background:var(--dsw-alias-bg-layer-2); cursor:pointer; transition:background-color .15s ease, border-color .15s ease; }
+.dmp_switch[aria-checked="true"] { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
+.dmp_switch:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
+.dmp_knob { position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgb(0 0 0 / .25); transition:transform .15s ease; }
+.dmp_switch[aria-checked="true"] .dmp_knob { transform:translateX(14px); }
+.dmp_actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.dmp_button { height:32px; padding:0 14px; border:1px solid var(--dsw-alias-border-l1); border-radius:var(--dsw-radius-md); background:transparent; color:var(--dsw-alias-label-primary); font:inherit; font-size:13px; cursor:pointer; }
+.dmp_button:hover:not(:disabled) { background:var(--dsw-alias-bg-layer-2); }
+.dmp_button:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
+.dmp_button:disabled { opacity:.5; cursor:default; }
+.dmp_primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); color:#fff; }
+.dmp_primary:hover:not(:disabled) { background:var(--dsw-alias-brand-primary); filter:brightness(1.06); }
+.dmp_meta { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; color:var(--dsw-alias-label-secondary); }
+.dmp_metaItem { display:inline-flex; align-items:center; gap:6px; }
+.dmp_dot { flex:none; width:6px; height:6px; border-radius:50%; }
+.dmp_dotOk { background:var(--dsw-alias-state-success-primary); }
+.dmp_dotBad { background:var(--dsw-alias-state-error-primary); }
+@media (prefers-reduced-motion: reduce) { .dmp_switch, .dmp_knob { transition:none; } }
+`
 
-    const inputStyle = {
-      width: '100%',
-      boxSizing: 'border-box',
-      padding: '7px 10px',
-      font: 'inherit',
-      fontSize: 13,
-      color: LABEL,
-      background: 'var(--dsw-alias-bg-base)',
-      border: `1px solid ${LINE}`,
-      borderRadius: RADIUS,
-    }
-
-    /** One tickable row; the whole row is the hit target, not just the box. */
-    const modelRowStyle = {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      padding: '7px 8px',
-      margin: '0 -8px',
-      borderRadius: RADIUS,
-      cursor: 'pointer',
-      fontSize: 13,
-      color: LABEL,
-    }
-
-    const modelListStyle = {
-      display: 'flex',
-      flexDirection: 'column',
-      maxHeight: 260,
-      overflowY: 'auto',
-      border: `1px solid ${LINE}`,
-      borderRadius: RADIUS,
-      padding: '6px 8px',
-    }
-
-    const groupHeadingStyle = {
-      margin: '10px 0 2px',
-      fontSize: 11,
-      fontWeight: 600,
-      letterSpacing: '0.04em',
-      textTransform: 'uppercase',
-      color: MUTED,
-    }
-
-    const modelIdStyle = { fontSize: 12, color: MUTED }
-
-    const rowStyle = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
-    const metaRowStyle = { display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: MUTED }
-    const metaItemStyle = { display: 'inline-flex', alignItems: 'center', gap: 6 }
-    const actionRowStyle = { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }
-
-    const textButtonStyle = {
-      padding: '3px 8px',
-      font: 'inherit',
-      fontSize: 12,
-      color: 'var(--dsw-alias-link)',
-      background: 'transparent',
-      border: 'none',
-      borderRadius: 'var(--dsw-radius-sm)',
-      cursor: 'pointer',
-    }
-
-    const fallbackButtonStyle = {
-      padding: '6px 14px',
-      font: 'inherit',
-      fontSize: 13,
-      color: LABEL,
-      background: 'var(--dsw-alias-bg-base)',
-      border: `1px solid ${LINE}`,
-      borderRadius: RADIUS,
-      cursor: 'pointer',
-    }
-
-    const plainButtonStyle = {
-      padding: '6px 14px',
-      font: 'inherit',
-      fontSize: 13,
-      color: LABEL,
-      background: 'transparent',
-      border: `1px solid ${LINE}`,
-      borderRadius: RADIUS,
-      cursor: 'pointer',
+    /**
+     * Insert the plugin stylesheet, replacing one this module left behind.
+     *
+     * Guarded for a non-DOM load (self-tests evaluate the factory without a
+     * `document`) and idempotent across reloads.
+     *
+     * @returns {() => void} the disposer that removes this sheet.
+     */
+    function installStyles() {
+      if (typeof document === 'undefined' || document.head === null) return () => {}
+      for (const old of document.querySelectorAll(`style[data-plugin-css="${STYLE_ID}"]`)) old.remove()
+      const tag = document.createElement('style')
+      tag.dataset.pluginCss = STYLE_ID
+      tag.textContent = CSS
+      document.head.appendChild(tag)
+      return () => {
+        tag.remove()
+      }
     }
 
     // --- transport -------------------------------------------------------------
@@ -304,7 +249,7 @@ window.__ModuleLoader__.load({
     // --- the page ---------------------------------------------------------------
 
     function ModelProxySection(props) {
-      const t = props.t
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
       const [status, setStatus] = useState(null)
       const [providers, setProviders] = useState(null)
       const [modelsError, setModelsError] = useState(null)
@@ -427,238 +372,198 @@ window.__ModuleLoader__.load({
       }, [proxy, models, log, refresh, t])
 
       if (loadError !== null) {
-        return h('div', { style: pageStyle }, [
-          h('h2', { key: 'title', style: titleStyle }, t('title')),
-          h('p', { key: 'err', style: errorStyle, role: 'alert' }, t('modelsFailed', { error: loadError })),
+        return h('div', { className: 'dmp_page' }, [
+          h('h2', { key: 'title', className: 'dmp_title' }, t('title')),
+          h('p', { key: 'err', className: 'dmp_error', role: 'alert' }, t('loadFailed', { error: loadError })),
           h(
             'button',
-            { key: 'reload', type: 'button', style: plainButtonStyle, onClick: () => void refresh() },
+            { key: 'reload', type: 'button', className: 'dmp_button', onClick: () => void refresh() },
             t('reload'),
           ),
         ])
       }
 
       const problems = Array.isArray(status?.problems) ? status.problems : []
-      const recent = Array.isArray(status?.recent) ? status.recent : []
       const routed = typeof status?.ruleCount === 'number' ? status.ruleCount : 0
-
-      const SaveButton =
-        Button !== undefined
-          ? h(Button, { key: 'save', onClick: () => void submit(), disabled: saving || !dirty }, saving ? t('saving') : t('save'))
-          : h(
-              'button',
-              { key: 'save', type: 'button', style: fallbackButtonStyle, onClick: () => void submit(), disabled: saving || !dirty },
-              saving ? t('saving') : t('save'),
-            )
 
       const visibleIds = groups.flatMap((group) => group.models.map((model) => model.id))
       const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => models.includes(id))
 
-      return h('div', { style: pageStyle }, [
-        h('header', { key: 'head' }, [
-          h('h2', { key: 'title', style: titleStyle }, t('title')),
-          h('p', { key: 'intro', style: introStyle }, t('intro')),
+      const modelRows =
+        groups.length === 0
+          ? [h('p', { key: 'empty', className: 'dmp_hint' }, t('modelsEmpty'))]
+          : groups.flatMap((group) => [
+              h('p', { key: `g-${group.provider}`, className: 'dmp_group' }, group.name),
+              ...group.models.map((model) =>
+                h('label', { key: `${group.provider}/${model.id}`, className: 'dmp_modelRow' }, [
+                  h('input', {
+                    key: 'c',
+                    type: 'checkbox',
+                    className: 'dmp_check',
+                    checked: models.includes(model.id),
+                    onChange: (event) => {
+                      toggle(model.id, event.target.checked)
+                    },
+                  }),
+                  h('span', { key: 'n', className: 'dmp_modelName' }, model.name === model.id ? model.id : model.name),
+                  model.name === model.id ? null : h('span', { key: 'id', className: 'dmp_modelId' }, model.id),
+                ]),
+              ),
+            ])
+
+      return h('div', { className: 'dmp_page' }, [
+        h('header', { key: 'head', className: 'dmp_header' }, [
+          h('h2', { key: 'title', className: 'dmp_title' }, t('title')),
+          h('p', { key: 'intro', className: 'dmp_hint' }, t('intro')),
         ]),
 
         // 1. the one proxy
-        h('section', { key: 'proxy', style: groupStyle }, [
-          h('h3', { key: 'h', style: groupTitleStyle }, t('proxyLabel')),
-          Input !== undefined
-            ? h(Input, {
-                key: 'i',
-                type: 'text',
-                spellCheck: false,
-                placeholder: t('proxyPlaceholder'),
-                value: proxy,
-                'aria-label': t('proxyLabel'),
-                onChange: (event) => {
-                  setProxy(event.target.value)
-                },
-              })
-            : h('input', {
-                key: 'i',
-                type: 'text',
-                style: inputStyle,
-                spellCheck: false,
-                placeholder: t('proxyPlaceholder'),
-                value: proxy,
-                'aria-label': t('proxyLabel'),
-                onChange: (event) => {
-                  setProxy(event.target.value)
-                },
-              }),
-          h('p', { key: 'hint', style: hintStyle }, t('proxyHint')),
+        h('section', { key: 'proxy', className: 'dmp_section' }, [
+          h('h3', { key: 'h', className: 'dmp_label' }, t('proxyLabel')),
+          h('input', {
+            key: 'i',
+            type: 'text',
+            className: 'dmp_input',
+            spellCheck: false,
+            placeholder: t('proxyPlaceholder'),
+            value: proxy,
+            'aria-label': t('proxyLabel'),
+            onChange: (event) => {
+              setProxy(event.target.value)
+            },
+          }),
+          h('p', { key: 'hint', className: 'dmp_hint' }, t('proxyHint')),
         ]),
 
         // 2. which models it applies to
-        h('section', { key: 'models', style: groupStyle }, [
-          h('div', { key: 'head', style: { ...rowStyle, justifyContent: 'space-between' } }, [
-            h('h3', { key: 'h', style: groupTitleStyle }, t('modelsLabel')),
-            h('span', { key: 'count', style: hintStyle }, t('modelsSelected', { count: String(models.length) })),
+        h('section', { key: 'models', className: 'dmp_section' }, [
+          h('div', { key: 'head', className: 'dmp_sectionHead' }, [
+            h('h3', { key: 'h', className: 'dmp_label' }, t('modelsLabel')),
+            h('span', { key: 'count', className: 'dmp_hint' }, t('modelsSelected', { count: String(models.length) })),
           ]),
-          h('p', { key: 'hint', style: hintStyle }, t('modelsHint')),
+          h('p', { key: 'hint', className: 'dmp_hint' }, t('modelsHint')),
 
-          modelsLoading
-            ? h('p', { key: 'loading', style: hintStyle }, t('modelsLoading'))
-            : null,
-          modelsError !== null ? h('p', { key: 'err', style: errorStyle }, t('modelsFailed', { error: modelsError })) : null,
+          modelsLoading ? h('p', { key: 'loading', className: 'dmp_hint' }, t('modelsLoading')) : null,
+          modelsError !== null ? h('p', { key: 'err', className: 'dmp_error' }, t('modelsFailed', { error: modelsError })) : null,
 
-          h('div', { key: 'tools', style: rowStyle }, [
+          h('div', { key: 'tools', className: 'dmp_tools' }, [
             h(
               'button',
               {
                 key: 'all',
                 type: 'button',
-                style: textButtonStyle,
+                className: 'dmp_textButton',
                 onClick: () => {
-                  setModels(allVisibleSelected ? models.filter((id) => !visibleIds.includes(id)) : [...new Set([...models, ...visibleIds])])
+                  setModels(
+                    allVisibleSelected
+                      ? models.filter((id) => !visibleIds.includes(id))
+                      : [...new Set([...models, ...visibleIds])],
+                  )
                 },
                 disabled: visibleIds.length === 0,
               },
               allVisibleSelected ? t('modelsSelectNone') : t('modelsSelectAll'),
             ),
+            allModelIds(providers).length > 6
+              ? h('input', {
+                  key: 'q',
+                  type: 'text',
+                  className: 'dmp_input',
+                  placeholder: t('modelsSearch'),
+                  'aria-label': t('modelsSearch'),
+                  value: query,
+                  onChange: (event) => {
+                    setQuery(event.target.value)
+                  },
+                })
+              : null,
           ]),
-
-          providers !== null && allModelIds(providers).length > 6
-            ? Input !== undefined
-              ? h(Input, {
-                  key: 'q',
-                  type: 'text',
-                  placeholder: t('modelsSearch'),
-                  'aria-label': t('modelsSearch'),
-                  value: query,
-                  onChange: (event) => {
-                    setQuery(event.target.value)
-                  },
-                })
-              : h('input', {
-                  key: 'q',
-                  type: 'text',
-                  style: inputStyle,
-                  placeholder: t('modelsSearch'),
-                  'aria-label': t('modelsSearch'),
-                  value: query,
-                  onChange: (event) => {
-                    setQuery(event.target.value)
-                  },
-                })
-            : null,
 
           h(
             'div',
-            { key: 'list', style: modelListStyle, role: 'group', 'aria-label': t('modelsLabel') },
-            groups.length === 0
-              ? [h('p', { key: 'empty', style: hintStyle }, t('modelsEmpty'))]
-              : groups.flatMap((group) => [
-                  h('p', { key: `g-${group.provider}`, style: groupHeadingStyle }, group.name),
-                  ...group.models.map((model) =>
-                    Checkbox !== undefined
-                      ? h(
-                          'label',
-                          { key: `${group.provider}/${model.id}`, style: modelRowStyle },
-                          [
-                            h(Checkbox, {
-                              key: 'c',
-                              checked: models.includes(model.id),
-                              label: '',
-                              onChange: (checked) => {
-                                toggle(model.id, checked)
-                              },
-                            }),
-                            h('span', { key: 'n' }, model.name === model.id ? model.id : model.name),
-                            model.name === model.id ? null : h('span', { key: 'id', style: modelIdStyle }, model.id),
-                          ],
-                        )
-                      : h('label', { key: `${group.provider}/${model.id}`, style: modelRowStyle }, [
-                          h('input', {
-                            key: 'c',
-                            type: 'checkbox',
-                            checked: models.includes(model.id),
-                            onChange: (event) => {
-                              toggle(model.id, event.target.checked)
-                            },
-                          }),
-                          h('span', { key: 'n' }, model.name === model.id ? model.id : model.name),
-                          model.name === model.id ? null : h('span', { key: 'id', style: modelIdStyle }, model.id),
-                        ]),
-                  ),
-                ]),
+            { key: 'list', className: 'dmp_list', role: 'group', 'aria-label': t('modelsLabel') },
+            modelRows,
           ),
         ]),
 
         // 3. diagnostics, kept quiet and last
-        h('section', { key: 'log', style: { ...rowStyle, justifyContent: 'space-between' } }, [
-          h('div', { key: 'text', style: { display: 'flex', flexDirection: 'column', gap: 4 } }, [
-            h('span', { key: 'l', style: { fontSize: 13, color: LABEL } }, t('logLabel')),
-            h('span', { key: 'h', style: hintStyle }, t('logHint')),
+        h('section', { key: 'log', className: 'dmp_rowBetween' }, [
+          h('div', { key: 'text', className: 'dmp_stack' }, [
+            h('span', { key: 'l', className: 'dmp_label' }, t('logLabel')),
+            h('span', { key: 'h', className: 'dmp_hint' }, t('logHint')),
           ]),
-          Switch !== undefined
-            ? h(Switch, {
-                key: 's',
-                checked: log,
-                label: t('logLabel'),
-                onChange: (checked) => {
-                  setLog(checked)
-                },
-              })
-            : h('input', {
-                key: 's',
-                type: 'checkbox',
-                checked: log,
-                onChange: (event) => {
-                  setLog(event.target.checked)
-                },
-              }),
-        ]),
-
-        h('div', { key: 'actions', style: actionRowStyle }, [
-          SaveButton,
           h(
             'button',
-            { key: 'reload', type: 'button', style: plainButtonStyle, onClick: () => void refresh(), disabled: saving },
+            {
+              key: 's',
+              type: 'button',
+              role: 'switch',
+              'aria-checked': log,
+              'aria-label': t('logLabel'),
+              className: 'dmp_switch',
+              onClick: () => {
+                setLog(!log)
+              },
+            },
+            h('span', { key: 'k', className: 'dmp_knob' }),
+          ),
+        ]),
+
+        h('div', { key: 'actions', className: 'dmp_actions' }, [
+          h(
+            'button',
+            {
+              key: 'save',
+              type: 'button',
+              className: 'dmp_button dmp_primary',
+              onClick: () => void submit(),
+              disabled: saving || !dirty,
+            },
+            saving ? t('saving') : t('save'),
+          ),
+          h(
+            'button',
+            { key: 'reload', type: 'button', className: 'dmp_button', onClick: () => void refresh(), disabled: saving },
             t('reload'),
           ),
-          h('span', { key: 'state', style: hintStyle }, dirty ? t('dirty') : t('unchanged')),
+          h('span', { key: 'state', className: 'dmp_hint' }, dirty ? t('dirty') : t('unchanged')),
         ]),
 
         notice === null
           ? null
-          : h('p', { key: 'notice', style: notice.kind === 'ok' ? successStyle : errorStyle }, notice.text),
+          : h(
+              'p',
+              { key: 'notice', className: notice.kind === 'ok' ? 'dmp_success' : 'dmp_error', role: 'status' },
+              notice.text,
+            ),
 
         problems.length > 0
-          ? h('section', { key: 'problems', style: groupStyle }, [
-              h('h3', { key: 'h', style: groupTitleStyle }, t('problems')),
-              ...problems.map((line, index) => h('p', { key: index, style: errorStyle }, line)),
+          ? h('section', { key: 'problems', className: 'dmp_section' }, [
+              h('h3', { key: 'h', className: 'dmp_label' }, t('problems')),
+              ...problems.map((line, index) => h('p', { key: index, className: 'dmp_error' }, line)),
             ])
           : null,
 
-        h('p', { key: 'scope', style: hintStyle }, t('scopeNote')),
+        h('p', { key: 'scope', className: 'dmp_hint' }, t('scopeNote')),
 
-        h('section', { key: 'status', style: groupStyle }, [
-          h('h3', { key: 'h', style: groupTitleStyle }, t('sectionStatus')),
-          h('div', { key: 'meta', style: metaRowStyle }, [
-            h('span', { key: 't', style: metaItemStyle }, [
-              StateDot !== undefined ? h(StateDot, { key: 'd', tone: status?.transport === true ? 'success' : 'error' }) : null,
+        h('section', { key: 'status', className: 'dmp_section' }, [
+          h('h3', { key: 'h', className: 'dmp_label' }, t('sectionStatus')),
+          h('div', { key: 'meta', className: 'dmp_meta' }, [
+            h('span', { key: 't', className: 'dmp_metaItem' }, [
+              h('span', {
+                key: 'd',
+                className: `dmp_dot ${status?.transport === true ? 'dmp_dotOk' : 'dmp_dotBad'}`,
+                'aria-hidden': true,
+              }),
               `${t('statusTransport')}: ${status?.transport === true ? t('statusReady') : t('statusNotReady')}`,
             ]),
-            h('span', { key: 'a', style: metaItemStyle }, `${t('statusActive')}: ${status?.active ?? t('statusNone')}`),
+            h('span', { key: 'a', className: 'dmp_metaItem' }, `${t('statusActive')}: ${status?.active ?? t('statusNone')}`),
             h(
               'span',
-              { key: 'r', style: metaItemStyle },
+              { key: 'r', className: 'dmp_metaItem' },
               `${t('statusRouting')}: ${routed === 0 ? t('statusRoutingNone') : t('statusRoutingCount', { count: String(routed) })}`,
             ),
           ]),
-        ]),
-
-        h('section', { key: 'recent', style: groupStyle }, [
-          h('h3', { key: 'h', style: groupTitleStyle }, t('sectionRecent')),
-          recent.length === 0
-            ? h('p', { key: 'none', style: hintStyle }, t('noRecent'))
-            : h(
-                'ul',
-                { key: 'list', style: { margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: '18px', color: MUTED } },
-                recent.map((line, index) => h('li', { key: index }, line)),
-              ),
         ]),
       ])
     }
@@ -668,6 +573,7 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-model-proxy: dictionaries')
+      ctx.effect(installStyles, 'dsh-model-proxy: styles')
 
       // One section of its own, ordered after the shipped ones so it reads as an
       // addition rather than displacing a built-in page.

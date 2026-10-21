@@ -1,25 +1,34 @@
 {
   "name": "dsh-model-proxy",
-  "version": "0.1.0",
-  "description": "Route individual models through their own proxy in DeepSeek Harness. Only model requests are affected; everything else keeps its original network path.",
+  "version": "0.2.0",
+  "description": "Model-scoped proxy for DeepSeek Harness: pick one proxy and the models that use it; every other request keeps its original network path.",
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": "0.2.1-rc.2"
   },
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "dependencies": {
@@ -27,6 +36,9 @@
   },
   "files": [
     "lib/",
+    "locale/*.json",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md"
-  ]}
+  ]
+}

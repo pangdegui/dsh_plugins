@@ -35,20 +35,14 @@ const React = {
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
 }
 
-/** Modules the composition provides to a client plugin by bare specifier. */
-const provided = new Map([
-  ['react', React],
-  [
-    '@deepseek-ai/dsh-client-ui-primitives',
-    {
-      Button: (props) => React.createElement('button', props),
-      Checkbox: (props) => React.createElement('input', { ...props, type: 'checkbox' }),
-      Input: (props) => React.createElement('input', { ...props, type: 'text' }),
-      Switch: (props) => React.createElement('input', { ...props, type: 'checkbox' }),
-      StateDot: (props) => React.createElement('span', props),
-    },
-  ],
-])
+/**
+ * Modules the composition provides to a client plugin by bare specifier.
+ *
+ * Only `react` is listed on purpose: current client-plugin guidance keeps a
+ * bundle off the Harness Client packages (they change without notice and a
+ * throwing component blanks the slot entry), so requiring one must fail here.
+ */
+const provided = new Map([['react', React]])
 
 /**
  * Load `lib/client.js` the way the Harness does: define the global loader, let
@@ -94,6 +88,7 @@ await test('exports the cordis plugin face', () => {
 function applyWithFakes() {
   const sections = []
   const dictionaries = []
+  const disposers = []
   const ctx = {
     locale: {
       // The real service is handed `{ zh, en }` per namespace and `bind` returns
@@ -122,6 +117,7 @@ function applyWithFakes() {
     },
     effect: (fn) => {
       const disposer = fn()
+      if (typeof disposer === 'function') disposers.push(disposer)
       return { dispose: disposer }
     },
   }
@@ -129,7 +125,7 @@ function applyWithFakes() {
   // The section component is called with the `t` that `bind` returned, so the
   // tests must use the same one rather than inventing a key-echo stub.
   for (const section of sections) section.t = ctx.locale.bind('modelProxy')
-  return { sections, dictionaries, t: ctx.locale.bind('modelProxy') }
+  return { sections, dictionaries, disposers, t: ctx.locale.bind('modelProxy') }
 }
 
 await test('owns one Settings section, not a route or a sidebar row', () => {
@@ -154,10 +150,45 @@ await test('registers both dictionaries', () => {
 
 await test('zh and en define the same keys', () => {
   const { dictionaries } = applyWithFakes()
-  const zh = dictionaries.find((entry) => entry.ns === 'modelProxy')?.table?.zh ?? {}
-  // `register(ns, { zh, en })` hands both tables to the same call, so read the
-  // raw tables back off the context instead of the flattened list.
-  assert.ok(Object.keys(zh).length > 0, 'the zh table must not be empty')
+  const table = dictionaries.find((entry) => entry.ns === 'modelProxy')?.table ?? {}
+  const zh = Object.keys(table.zh ?? {}).sort()
+  const en = Object.keys(table.en ?? {}).sort()
+  assert.ok(zh.length > 0, 'the zh table must not be empty')
+  assert.deepEqual(en, zh, 'a key missing from one language falls back to the raw key')
+  assert.ok(zh.includes('loadFailed'), 'the configuration-load failure has its own sentence')
+  assert.ok(zh.includes('proxyLabel') && zh.includes('modelsLabel'))
+})
+
+await test('owns one stylesheet, removed by its disposer', () => {
+  const inserted = []
+  const removed = []
+  globalThis.document = {
+    head: { appendChild: (tag) => inserted.push(tag) },
+    querySelectorAll: () => [],
+    createElement: () => {
+      const tag = {
+        dataset: {},
+        textContent: '',
+        remove: () => {
+          removed.push(tag)
+        },
+      }
+      return tag
+    },
+  }
+  try {
+    const { disposers } = applyWithFakes()
+    assert.equal(inserted.length, 1, 'one plugin-owned <style> is enough')
+    const css = inserted[0].textContent
+    assert.ok(css.includes('.dmp_'), 'every rule stays under the plugin prefix')
+    assert.ok(css.includes('--dsw-alias-border-l1'), 'borders use the current token')
+    assert.ok(!css.includes('--dsw-alias-line-'), 'the removed line tokens must not come back')
+    assert.ok(!css.includes('--dsw-alias-link'), 'the removed link token must not come back')
+    for (const dispose of disposers) dispose()
+    assert.equal(removed.length, 1, 'unloading removes the sheet')
+  } finally {
+    delete globalThis.document
+  }
 })
 
 // --- rendering ---------------------------------------------------------------
@@ -236,6 +267,17 @@ await test('the page asks for a proxy address and a model list', async () => {
   assert.ok(text.includes('生效的模型'), 'the model list must be labelled')
   assert.ok(!text.includes('provider / model'), 'the old free-text rule language must be gone')
   assert.ok(!text.includes('每行一个'), 'the old one-entry-per-line textareas must be gone')
+})
+
+await test('the page shows the current configuration, not a decision history', async () => {
+  const { sections } = applyWithFakes()
+  const text = textOf(sections[0].component({ t: sections[0].t }))
+  // The proxy field and the tick list already answer "what is configured now".
+  // A rolling log in the page is noise, so the section and its empty state are
+  // both gone; only the optional Host log switch remains.
+  assert.ok(!text.includes('最近决策'), 'no decision-history section')
+  assert.ok(!text.includes('还没有请求'), 'no empty-history placeholder')
+  assert.ok(text.includes('记录路由决策'), 'the Host log switch is a diagnostic, not a history')
 })
 
 await test('the proxy field is a labelled single-line input', async () => {
