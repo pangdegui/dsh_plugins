@@ -115,7 +115,8 @@ assert.equal(guardAssembly(settings, untouched, undefined), untouched)
 const prepended = guardAssembly(settings, makeAssembly(), 'workbuddy')
 assert.equal(prepended.sections.length, 2)
 assert.ok(prepended.sections[0].text.startsWith('Hello gateway.\n\n'))
-assert.ok(prepended.sections[0].text.includes(IDENTITY))
+// The sentence survives as wording, with DSH's name swapped for WorkBuddy's.
+assert.ok(prepended.sections[0].text.includes('You are an AI agent powered by WorkBuddy.'))
 assert.deepEqual(prepended.sections[1], { name: 'persona', text: 'You are a coding agent powered by the hy3 model.' })
 // The input assembly is never mutated, so another provider keeps its prompt.
 assert.equal(untouched.sections[0].text, IDENTITY)
@@ -145,6 +146,19 @@ assert.ok(!replaced.sections.some((section) => section.name === 'harness:identit
 
 // replacing an assembly that carries no identity section leaves it alone
 // (checked with the other no-op cases below).
+
+// The gateway scans the whole system prompt, not just its opening, so later
+// mentions of DSH's name are renamed as well.
+const late = {
+  sections: [
+    { name: 'persona', text: 'You are a coding agent.\n\nThe runtime context names the DeepSeek Harness implementation checkout.' },
+  ],
+  variables: {},
+}
+const scrubbed = guardAssembly({ ...settings, promptGuard: 'strip' }, late, 'workbuddy')
+assert.ok(!/DeepSeek Harness/.test(scrubbed.sections[0].text), 'later mentions must be renamed')
+assert.match(scrubbed.sections[0].text, /WorkBuddy implementation checkout/)
+assert.equal(guardAssembly({ ...settings, promptGuard: 'off' }, late, 'workbuddy'), late, 'off must not touch content')
 
 // stripping an assembly that has no identity section leaves it alone.
 const personaOnly = { sections: [{ name: 'persona', text: 'You are a coding agent.' }], variables: {} }

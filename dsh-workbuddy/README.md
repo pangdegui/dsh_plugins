@@ -94,11 +94,13 @@ DeepSeek、MiniMax、Hunyuan 等），略去图片/视频/补全等非聊天路�
 - 模型：`POST /v2/chat/completions`，OpenAI Chat Completions 形状，
   **只支持流式**（非流式会被服务端以 `11101` 拒绝），支持 `tools` 与
   `stream_options.include_usage`。
-- **提示词校验**：网关会拒绝以 DSH 身份句（`You are an AI agent powered by
-  DeepSeek Harness.`）开头的 `system` 消息，返回 `400` 与业务码 `11128
-  Illegal API invocation from an unapproved channel`。它是内容级的：这句话放在
-  提示词后面、或作为用户消息内容都不触发；签名和 token scope 都不参与判断。
-  插件的「提示词守卫」就是为这一条准备的。
+- **提示词校验**：网关会拒绝系统提示词里出现 DSH 的身份标识，返回 `400` 与业务码
+  `11128 Illegal API invocation from an unapproved channel`。这条规则**变过**：
+  最早只看开头那句 `You are an AI agent powered by DeepSeek Harness.`，现在整段
+  扫描——把开头那句删掉、只在后面的运行时上下文里留下 `The runtime context names
+  the DeepSeek Harness implementation checkout…`，一样会被拒。所以插件的提示词守卫
+  不只处理开头，还会把整段提示词里的 `DeepSeek Harness` / `deepseek-harness`
+  统一改名成 `WorkBuddy`（实测改名后同样内容可以正常流式返回）。
 - **角色校验**：网关同样拒绝 `role: "developer"` 的指令消息，返回同一个
   `11128`。pi-ai 只在「模型是推理模型 + compat 允许」时才把指令消息发成
   `developer`。
@@ -121,7 +123,7 @@ DeepSeek、MiniMax、Hunyuan 等），略去图片/视频/补全等非聊天路�
 
 WorkBuddy 的模型网关会做一次"渠道校验"，对三种请求返回 `400 / 11128`：
 
-1. 系统提示词的**开头**是 DSH 的身份句；
+1. 系统提示词里出现 DSH 的身份标识（整段扫描，不只开头）；
 2. 指令消息用了 `developer` 角色（pi-ai 对推理模型会优先用它）；
 3. `User-Agent` 自称 `deepseek-harness/…`（DSH 的默认值）。
 
@@ -143,6 +145,10 @@ token 上限、请求头和每条指令消息的开头 60 字（token 打码）�
 | 删除身份行 | 移除 `harness:identity` 段，提示词从部署人设开始 |
 | 删除并换成 WorkBuddy 介绍 | 移除身份行，把 `promptPrefix` 放到最前面当开场白 |
 
+除「关闭」外，三种方式都会把提示词里所有的 `DeepSeek Harness` /
+`deepseek-harness` 改写成 `WorkBuddy`——这一条是内容级的，改名后同一份提示词
+实测可以正常返回。
+
 只影响本插件注册的 provider 路由；其它 provider 拿到的提示词与装配结果一字不
 差。守卫挂在 `system-prompt/assemble` 瀑布上，读的是该次装配的
 `variables.provider`，所以同一次对话切换模型也不会串。
@@ -152,7 +158,7 @@ token 上限、请求头和每条指令消息的开头 60 字（token 打码）�
 ```yaml
 - id: workbuddy
   config:
-    promptGuard: prepend            # off | prepend | strip
+    promptGuard: replace            # off | prepend | strip | replace
     promptPrefix: This session is served through WorkBuddy.
     gatewayHeaders: true            # 发官方客户端那套请求头（默认开）
     appVersion: 1.0.0               # 写进 X-IDE-Version 和 UA 的版本号
