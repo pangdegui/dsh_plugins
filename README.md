@@ -6,7 +6,6 @@
 
 | 插件 | 说明 |
 |---|---|
-| [dsh-workbuddy](dsh-workbuddy/) | 登录 WorkBuddy（腾讯），把它支持的聊天模型接入 DSH；支持二维码/浏览器登录与 token 自动续期。 |
 | [dsh-model-proxy](dsh-model-proxy/) | 只让选中的模型走指定 HTTP 代理，其余请求保持原网络路径。 |
 | [dsh-web-access](dsh-web-access/) | 配置监听地址与受信主机，可选在启动令牌前加一道 TOTP 验证。 |
 | [dsh-session-delete](dsh-session-delete/) | 在侧栏菜单提供「删除会话」，连同日志、投影缓存、工作区记账和 spill 文件一起清理。 |
