@@ -1,13 +1,13 @@
 {
   "name": "dsh-session-delete",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Permanent session deletion for DeepSeek Harness: a Delete session row in the sidebar Session menu with a risk-consent dialog, and the Host-side removal of the session log, projection cache, workspace accounting and spill files.",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=24",
-    "dsh": "0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.2 <0.2.2"
   },
   "main": "lib/index.js",
   "exports": {

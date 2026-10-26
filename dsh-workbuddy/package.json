@@ -1,12 +1,12 @@
 {
   "name": "dsh-workbuddy",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "WorkBuddy (腾讯 WorkBuddy) account login and model routes for DeepSeek Harness: browser login, token rotation, and a pi-ai provider that exposes WorkBuddy's chat models in DSH.",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=20",
-    "dsh": "0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.2 <0.2.2"
   },
   "scripts": {
     "test": "node test/unit.mjs && node test/wire.test.mjs && node test/client.test.mjs"

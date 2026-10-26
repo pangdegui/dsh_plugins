@@ -1,12 +1,12 @@
 {
   "name": "dsh-model-proxy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Model-scoped proxy for DeepSeek Harness: pick one proxy and the models that use it; every other request keeps its original network path.",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=20",
-    "dsh": "0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.2 <0.2.2"
   },
   "main": "lib/index.js",
   "exports": {
