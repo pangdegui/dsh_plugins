@@ -77,12 +77,12 @@
       },
       "versions": [
         {
-          "version": "0.2.0",
-          "publishTimestamp": 1792549171,
+          "version": "0.2.1",
+          "publishTimestamp": 1792996446,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "1076c98c42fb4090d0ba3a4daa4fec606071384b",
+            "commit": "98385c710dcf4c61f373362d985abdae72036bef",
             "path": "dsh-model-proxy"
           }
         }
@@ -119,12 +119,12 @@
       },
       "versions": [
         {
-          "version": "0.2.0",
-          "publishTimestamp": 1792250368,
+          "version": "0.2.1",
+          "publishTimestamp": 1792996446,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "1076c98c42fb4090d0ba3a4daa4fec606071384b",
+            "commit": "98385c710dcf4c61f373362d985abdae72036bef",
             "path": "dsh-session-delete"
           }
         }
@@ -205,12 +205,12 @@
       },
       "versions": [
         {
-          "version": "0.4.2",
-          "publishTimestamp": 1792737633,
+          "version": "0.4.3",
+          "publishTimestamp": 1792996446,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "1076c98c42fb4090d0ba3a4daa4fec606071384b",
+            "commit": "98385c710dcf4c61f373362d985abdae72036bef",
             "path": "dsh-workbuddy"
           }
         }
