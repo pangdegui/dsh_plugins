@@ -176,11 +176,31 @@ const second = buildCtx()
 apply(second.ctx, config)
 assert.equal(fs.readFileSync(patchPath, 'utf8'), written, 'an unchanged document is not rewritten')
 
+// 4b. A row the settings service wrote *inside* the block (a plugin-market
+// source, say) is not this plugin's to delete: a rewrite keeps it verbatim.
+const MANAGED_START = '# >>> dsh-web-access managed rows >>>'
+const MANAGED_END = '# <<< dsh-web-access managed rows <<<'
+const foreignRow = '- id: plugin-market\n  name: "@deepseek-ai/dsh-plugin-market"\n  config:\n    indexes:\n      - https://example.com/plugin-market.json'
+fs.writeFileSync(patchPath, written.replace(MANAGED_END, `${foreignRow}\n${MANAGED_END}`))
+const fourth = buildCtx()
+apply(fourth.ctx, { ...config, trustedHosts: ['10.9.9.9'] })
+const rewritten = fs.readFileSync(patchPath, 'utf8')
+assert.match(rewritten, /- id: plugin-market/u, 'a foreign row survives a rewrite')
+assert.match(rewritten, /https:\/\/example\.com\/plugin-market\.json/u, 'the foreign row keeps its content')
+assert.match(rewritten, /- "10\.9\.9\.9"/u, 'our own row is still rewritten')
+assert.equal(rewritten.indexOf('- id: plugin-market') > rewritten.indexOf(MANAGED_START), true, 'the foreign row stays inside the block')
+const fourthAgain = buildCtx()
+apply(fourthAgain.ctx, { ...config, trustedHosts: ['10.9.9.9'] })
+assert.equal(fs.readFileSync(patchPath, 'utf8'), rewritten, 'preserving a foreign row stays idempotent')
+for (const dispose of fourth.disposers) dispose()
+for (const dispose of fourthAgain.disposers) dispose()
+
 // 5. Back to loopback closes the proxy and removes the block.
 const third = buildCtx()
 apply(third.ctx, { ...config, bind: '127.0.0.1', trustedHosts: [] })
 const stripped = fs.readFileSync(patchPath, 'utf8')
 assert.equal(stripped.includes('dsh-web-access managed rows'), false, 'the block is gone')
+assert.match(stripped, /- id: plugin-market/u, 'the foreign row outlives the block')
 assert.match(stripped, /- id: web-access/u, 'the user layer is untouched')
 const refused = await new Promise((resolve) => {
   const req = http.request({ host: '127.0.0.1', port: lanPort, path: '/' }, () => resolve(false))

@@ -207,6 +207,34 @@ function trustedAuthorities(config) {
 }
 
 /**
+ * Split a managed-block body into its top-level patch entries.
+ *
+ * Each `- ` line opens an entry; any other non-empty line continues the current
+ * one. Foreign rows land inside this block because the settings service appends
+ * to the patch document, so the split has to survive whatever they contain.
+ *
+ * @param {string} text - the text between the managed markers.
+ * @returns {string[]} one entry per `- ` line, trailing whitespace removed.
+ */
+function blockEntries(text) {
+  const entries = []
+  let current = null
+  for (const line of text.split(/\r?\n/u)) {
+    if (line.startsWith('- ')) {
+      if (current !== null) entries.push(current)
+      current = [line]
+    } else if (current !== null) {
+      current.push(line)
+    }
+  }
+  if (current !== null) entries.push(current)
+  return entries.map((lines) => lines.join('\n').replace(/\s+$/u, ''))
+}
+
+/** Whether one patch entry is this plugin's fence row. */
+const OWN_ROW = /^-\s+id:\s*connection\b/u
+
+/**
  * The YAML rows this plugin owns in the profile patch.
  *
  * Only the fence needs a row: the proxy serves `http://<lan>:<port>`, and the
@@ -259,13 +287,24 @@ function syncManagedRows(ctx, config) {
     }
     before = ''
   }
-  const body = managedRows(config)
-  const block = body === '' ? '' : `${MANAGED_START}\n${body}\n${MANAGED_END}\n`
   const start = before.indexOf(MANAGED_START)
   const end = before.indexOf(MANAGED_END)
+  const existing = start !== -1 && end > start ? before.slice(start + MANAGED_START.length, end) : ''
+  // Rows the settings service wrote into this block are not ours to drop: keep
+  // every entry that is not the fence row, verbatim and after our own row.
+  const foreign = blockEntries(existing).filter((entry) => !OWN_ROW.test(entry))
+  const own = managedRows(config)
+  const body = [own, ...foreign].filter((part) => part !== '').join('\n')
+  // No fence row means no markers; a foreign row stays behind as an ordinary entry.
+  const block = own === '' ? '' : `${MANAGED_START}\n${body}\n${MANAGED_END}\n`
   let after = before
   if (start !== -1 && end > start) {
-    after = `${before.slice(0, start)}${block}${before.slice(end + MANAGED_END.length).replace(/^\r?\n/u, '')}`
+    const head = before.slice(0, start)
+    const tail = before.slice(end + MANAGED_END.length).replace(/^\r?\n/u, '')
+    // With no fence row the markers go away, but a foreign row must not go with them.
+    after = block !== ''
+      ? `${head}${block}${tail}`
+      : `${head}${foreign.length === 0 ? '' : `${foreign.join('\n')}\n`}${tail}`
   } else if (block !== '') {
     after = `${before.trimEnd()}\n\n${block}`
   }
