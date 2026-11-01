@@ -41,11 +41,18 @@
 
 ## 更新索引
 
-修改某个插件的版本后，重新生成并提交：
+修改某个插件的版本后，重新生成、提交并推送：
 
 ```bash
 node tools/gen-market-index.mjs
+git add plugin-market.json && git commit -m "chore(market): publish <name> <version>" && git push
+node tools/purge-market-cdn.mjs
 ```
+
+最后一步不能省：索引地址走的是 `cdn.jsdelivr.net/gh/...@master/...`，jsDelivr 会把可变的
+`@master` 缓存数小时。只 push 不清缓存时，**发现** 里点几次「刷新」拿到的还是旧文档——
+如果本地装的版本已经比索引里的新，DSH 只会显示 `different-version`，不会再提示「有更新」。
+`tools/purge-market-cdn.mjs` 先清缓存再回读 CDN，确认它和 `HEAD` 里的 `plugin-market.json` 一致。
 
 生成器从每个目录的 `package.json` 与 git 读取包名、版本、发布时间和当前提交，保留索引里已有的标题、描述、分类、标签与图标等编辑内容。索引里的版本固定到生成时的 `HEAD`，因此后续 `master` 前进不会改变已发布版本指向的代码。
 
