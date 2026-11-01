@@ -5,11 +5,11 @@
  * with an optional **TOTP gate**, without hard-coding any assumption about
  * where the deployment sits (intranet, LAN, VPN, public).
  *
- * Three responsibilities:
+ * Four responsibilities:
  *
- *   1. Settings. Four volatile fields are declared so the shipped Settings
- *      machinery renders a native form; the values are the single source of
- *      truth for how far this profile is reachable.
+ *   1. Settings. The fields are declared so the shipped Settings machinery
+ *      renders a native form; the values are the single source of truth for how
+ *      far this profile is reachable.
  *
  *   2. Reachability. dsh 0.2.1 rejects a wildcard bind at startup and the
  *      desktop host hardcodes `http://127.0.0.1:<port>` for its window, so the
@@ -17,7 +17,12 @@
  *      proxy on a concrete LAN address at the same port, forwarding to the
  *      loopback listener and writing only the trust-fence row the proxy needs.
  *
- *   3. The TOTP gate. A script-free login entry (`/dsh-access`) verifies a
+ *   3. Discovery. An optional mDNS alias (`dsh.local` unless the panel names
+ *      another one) resolves to the proxy's LAN address, so the URL survives a
+ *      DHCP change, and an `_http._tcp` service record lets discovery tools
+ *      find the login entry. See `./mdns.js` for the wire format.
+ *
+ *   4. The TOTP gate. A script-free login entry (`/dsh-access`) verifies a
  *      time-based one-time password and then hands back the process launch
  *      token through `connection.authenticatedUrl`, which is exactly the
  *      exchange the application's own root uses: the browser ends up holding
@@ -45,6 +50,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import { DEFAULT_ALIAS, MdnsPublisher, normalizeAlias } from './mdns.js'
 import { base32Encode, base32Decode, otpauthUri, verifyTotp } from './totp.js'
 import { renderSVG } from './uqr.js'
 
@@ -81,6 +87,10 @@ export const Config = z.object({
   totpEnabled: z.boolean().default(false),
   /** Which callers the gate covers: every authority, or non-loopback only. */
   totpGate: z.union([z.const('all'), z.const('remote')]).default('all'),
+  /** Publish a `.local` alias for the LAN entry over mDNS. */
+  mdnsEnabled: z.boolean().default(false),
+  /** Alias to publish; `dsh.local` unless the operator names another one. */
+  mdnsName: z.string().default(DEFAULT_ALIAS),
 })
 
 const LOGIN_PATH = '/dsh-access'
@@ -168,6 +178,13 @@ let lastManaged = { path: null, changed: false, at: 0, error: null }
 /** The LAN-facing proxy: bound to one concrete LAN address, never to 0.0.0.0. */
 const proxyState = { servers: [], host: null, port: null, upstream: null, listening: false, error: null }
 
+/**
+ * The running alias publisher and the inputs it was built from. `key` keeps a
+ * reconcile with unchanged settings from restarting the responder, and `error`
+ * carries a construction failure, which the publisher's own status cannot.
+ */
+let mdnsState = { publisher: null, key: null, error: null }
+
 /** This machine's non-internal IPv4 addresses, the same set upstream derives. */
 function localIpv4Addresses() {
   return Object.values(os.networkInterfaces())
@@ -201,6 +218,9 @@ function trustedAuthorities(config) {
     const address = pickLanAddress(config)
     if (address !== null) merged.push(address)
     if (config.autoTrustLocalIps) merged.push(...localIpv4Addresses())
+    // The alias resolves to that address, but the fence reads the *name* from
+    // the Host header, so the published name has to be trusted explicitly.
+    if (config.mdnsEnabled === true) merged.push(config.mdnsName)
   }
   merged.push(...config.trustedHosts)
   return [...new Set(merged.map((entry) => (typeof entry === 'string' ? entry.trim() : '')).filter((entry) => entry !== ''))]
@@ -453,10 +473,60 @@ function stopProxy() {
   }
 }
 
+/**
+ * Publish the `.local` alias for the LAN entry, or stop the previous one.
+ *
+ * The alias points at the proxy's address and port, so it is only meaningful
+ * while that proxy exists: a loopback-only profile publishes nothing. Never
+ * throws — mDNS is an advertisement, and a network that blocks multicast must
+ * not keep the application from starting.
+ */
+function startMdns(ctx, config) {
+  if (config.bind === '127.0.0.1' || config.mdnsEnabled !== true) {
+    stopMdns()
+    return
+  }
+  const address = proxyState.host ?? pickLanAddress(config)
+  if (address === null) {
+    stopMdns()
+    mdnsState.error = 'this machine has no LAN IPv4 address to publish'
+    return
+  }
+  const port = proxyState.port ?? (Number.isInteger(config.lanPort) && config.lanPort > 0 ? config.lanPort : DEFAULT_LAN_PORT)
+  const key = `${config.mdnsName}|${address}|${String(port)}`
+  if (mdnsState.publisher !== null && mdnsState.key === key) return
+  stopMdns()
+  const publisher = internals.createPublisher({
+    name: config.mdnsName,
+    address,
+    port,
+    logger: ctx.logger,
+    interfaceAddresses: () => localIpv4Addresses(),
+  })
+  mdnsState = { publisher, key, error: null }
+  publisher.start().catch((error) => {
+    mdnsState.error = error instanceof Error ? error.message : String(error)
+    ctx.logger?.warn?.('web-access: mDNS alias %s could not be published: %s', config.mdnsName, mdnsState.error)
+  })
+}
+
+/** Close the alias publisher, if one is running. */
+function stopMdns() {
+  if (mdnsState.publisher !== null) {
+    try {
+      mdnsState.publisher.stop()
+    } catch {
+      // closing a socket that already failed is not worth surfacing
+    }
+  }
+  mdnsState = { publisher: null, key: null, error: null }
+}
+
 /** Apply the configured reach: fence row first, then the LAN listener. */
 async function reconcile(ctx, config) {
   syncManagedRows(ctx, config)
   startProxy(ctx, config)
+  startMdns(ctx, config)
   if (lastManaged.error !== null) {
     ctx.logger?.warn?.('web-access: managed rows were not written: %s', lastManaged.error)
   }
@@ -693,6 +763,8 @@ function configPayload(ctx, config) {
       trustedHosts: config.trustedHosts,
       totpEnabled: config.totpEnabled,
       totpGate: config.totpGate,
+      mdnsEnabled: config.mdnsEnabled,
+      mdnsName: config.mdnsName,
     },
     status: {
       host: ctx.get('webServer')?.host ?? null,
@@ -703,6 +775,16 @@ function configPayload(ctx, config) {
         port: proxyState.port,
         listening: proxyState.listening,
         error: proxyState.error,
+      },
+      /** The mDNS alias, whether it is answering, and why it is not. */
+      mdns: {
+        enabled: config.bind !== '127.0.0.1' && config.mdnsEnabled === true,
+        name: config.mdnsName,
+        address: mdnsState.publisher?.address ?? (config.bind === '127.0.0.1' ? null : pickLanAddress(config)),
+        port: mdnsState.publisher?.port ?? (config.bind === '127.0.0.1' ? null : config.lanPort),
+        published: mdnsState.publisher?.status.published === true,
+        error: mdnsState.error ?? mdnsState.publisher?.status.error ?? null,
+        conflict: mdnsState.publisher?.status.conflict === true,
       },
       trustLive: [...(ctx.get('connection')?.trustedHosts ?? [])],
       localIps: localIpv4Addresses(),
@@ -787,6 +869,17 @@ function validatePatch(body) {
   if (body.totpGate !== undefined) {
     if (!TOTP_GATES.has(body.totpGate)) throw new HttpError(400, 'totpGate must be all or remote')
     patch.totpGate = body.totpGate
+  }
+  if (body.mdnsEnabled !== undefined) {
+    if (typeof body.mdnsEnabled !== 'boolean') throw new HttpError(400, 'mdnsEnabled must be a boolean')
+    patch.mdnsEnabled = body.mdnsEnabled
+  }
+  if (body.mdnsName !== undefined) {
+    try {
+      patch.mdnsName = normalizeAlias(body.mdnsName)
+    } catch (error) {
+      throw new HttpError(400, `mdnsName is not a usable .local alias: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
   return patch
 }
@@ -975,6 +1068,15 @@ function registerRoutes(ctx, config) {
 
 // --- plugin ------------------------------------------------------------------
 
+/**
+ * The only seam tests need: the responder's socket and the wider network are
+ * not available in a unit test, so the publisher is created through this table.
+ * Production code never replaces it.
+ */
+export const internals = {
+  createPublisher: (options) => new MdnsPublisher(options),
+}
+
 export function apply(ctx, config) {
   const settings = config ?? {}
   // Coerce every field to its exact expected primitive. `??` alone is not
@@ -991,6 +1093,16 @@ export function apply(ctx, config) {
       : [],
     totpEnabled: settings.totpEnabled === true,
     totpGate: settings.totpGate === 'remote' ? 'remote' : 'all',
+    mdnsEnabled: settings.mdnsEnabled === true,
+    // A hand-edited patch can carry a name the schema accepts but the wire
+    // cannot; publish the default instead of failing the whole plugin.
+    mdnsName: (() => {
+      try {
+        return normalizeAlias(settings.mdnsName)
+      } catch {
+        return DEFAULT_ALIAS
+      }
+    })(),
   }
 
   // The fence and the listener belong to other entries; adopt them once the
@@ -1003,6 +1115,7 @@ export function apply(ctx, config) {
     syncManagedRows(webCtx, resolved)
     startProxy(webCtx, resolved)
     webCtx.effect(() => () => stopProxy(), 'web-access: LAN proxy')
+    webCtx.effect(() => () => stopMdns(), 'web-access: mDNS alias')
 
     // Reconcile once more after boot settles: the port is final then, and a
     // config change that restarted this fiber lands here too. The effect stays

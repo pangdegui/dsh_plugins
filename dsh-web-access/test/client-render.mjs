@@ -88,6 +88,9 @@ const walk = (node) => {
   if (typeof node !== 'object') return
   nodes += 1
   assert.ok(node.type !== undefined && node.type !== null, 'every element has a type')
+  // Field/Check take their visible label as a prop; the real renderer prints
+  // it, so the shallow walk has to collect it here.
+  if (typeof node.props?.label === 'string') texts.push(node.props.label)
   for (const child of node.children ?? []) walk(child)
   walk(node.props?.children)
 }
@@ -101,6 +104,7 @@ assert.ok(
   'the heading copy is rendered (dictionary fallback when no t seat is injected)',
 )
 assert.ok(texts.length > 10, `the panel renders visible copy (got ${texts.length} text nodes)`)
+assert.ok(texts.some((text) => text.includes('.local')), 'the mDNS alias control is rendered')
 
 console.log('dsh-web-access client checks')
 console.log(`  registrations: ${registered.map((entry) => entry.options.name).join(', ')}`)

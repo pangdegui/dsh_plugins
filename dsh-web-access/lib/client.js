@@ -57,6 +57,16 @@ window.__ModuleLoader__.load({
       lanAddressHint: '留空自动选择(优先 192.168 网段);也可以固定填本机某个 IPv4。',
       lanPort: '局域网端口',
       lanPortHint: '固定端口,默认 3080,保存后立即生效。应用自身的回环端口仍由启动决定,窗口不受影响。',
+      mdnsEnabled: '发布 .local 别名(mDNS)',
+      mdnsHint: '在本机局域网地址上发布一个 mDNS 别名,其他设备用 http://<名字>:<端口> 即可访问,IP 变了也不用改。Windows、macOS、iOS 可解析;Android 的系统解析器一般不行。',
+      mdnsNeedsLan: '需要先把“监听地址”设为局域网(0.0.0.0)。',
+      mdnsName: '.local 别名',
+      mdnsNameHint: '默认 dsh.local。局域网里已有同名设备时换一个,例如 dsh-88.local。',
+      mdnsLive: 'mDNS 别名',
+      mdnsOff: '未发布',
+      mdnsPending: '已开启,尚未确认',
+      mdnsError: '别名发布失败:{error}',
+      mdnsConflict: '局域网里已有设备占用这个别名,部分客户端可能解析到对方,建议换一个名字。',
       lanEndpoint: '局域网入口',
       lanOff: '未启用',
       lanError: '局域网代理未监听:{error}',
@@ -117,6 +127,16 @@ window.__ModuleLoader__.load({
       lanAddressHint: 'Leave empty to pick automatically (192.168 addresses first), or pin one of this machine\'s IPv4 addresses.',
       lanPort: 'LAN port',
       lanPortHint: 'Fixed port, default 3080, applied live. The application\'s own loopback port stays launch-assigned, so the desktop window is unaffected.',
+      mdnsEnabled: 'Publish a .local alias (mDNS)',
+      mdnsHint: 'Publish an mDNS alias for this machine\'s LAN address, so other devices can use http://<name>:<port> and keep working when the IP changes. Windows, macOS, and iOS resolve it; Android\'s system resolver generally does not.',
+      mdnsNeedsLan: 'Set the listen address to the LAN (0.0.0.0) first.',
+      mdnsName: '.local alias',
+      mdnsNameHint: 'Defaults to dsh.local. Change it when another device already answers to that name, e.g. dsh-88.local.',
+      mdnsLive: 'mDNS alias',
+      mdnsOff: 'not published',
+      mdnsPending: 'on, not confirmed yet',
+      mdnsError: 'The alias could not be published: {error}',
+      mdnsConflict: 'Another device already claims this alias on the network; some clients may resolve to it instead. Pick another name.',
       lanEndpoint: 'LAN entry',
       lanOff: 'off',
       lanError: 'The LAN proxy is not listening: {error}',
@@ -308,6 +328,18 @@ window.__ModuleLoader__.load({
       throw lastError
     }
 
+    /**
+     * The Host normalizes a bare `dsh` into `dsh.local` before persisting it.
+     * Normalize the draft the same way on save, or the read-back would never
+     * match what was submitted and the panel would claim the write did not
+     * apply.
+     */
+    const aliasInput = (value) => {
+      const raw = String(value ?? '').trim().toLowerCase().replace(/\.+$/u, '')
+      if (raw === '') return 'dsh.local'
+      return raw.endsWith('.local') ? raw : `${raw}.local`
+    }
+
     function CopyButton(props) {
       const t = props.t
       const [copied, setCopied] = useState(false)
@@ -336,6 +368,7 @@ window.__ModuleLoader__.load({
           id: props.id,
           type: 'checkbox',
           checked: props.checked === true,
+          disabled: props.disabled === true,
           style: { marginTop: 2, flex: 'none' },
           onChange: (event) => { props.onChange(event.currentTarget.checked) },
         }),
@@ -378,7 +411,7 @@ window.__ModuleLoader__.load({
 
       const save = useCallback(() => {
         if (draft === null) return
-        const wanted = { ...draft }
+        const wanted = { ...draft, mdnsName: aliasInput(draft.mdnsName) }
         setSaveState('saving')
         setSaveError(null)
         readJson(CONFIG_PATH, {
@@ -407,7 +440,8 @@ window.__ModuleLoader__.load({
                 return
               }
               const applied = latest.config ?? {}
-              const same = ['bind', 'autoTrustLocalIps', 'totpEnabled', 'totpGate'].every((key) => applied[key] === wanted[key])
+              const same = ['bind', 'autoTrustLocalIps', 'totpEnabled', 'totpGate', 'mdnsEnabled'].every((key) => applied[key] === wanted[key])
+                && applied.mdnsName === wanted.mdnsName
                 && JSON.stringify(applied.trustedHosts ?? []) === JSON.stringify(wanted.trustedHosts ?? [])
               if (same) {
                 setDraft(applied)
@@ -531,6 +565,30 @@ window.__ModuleLoader__.load({
                 },
               }),
             }),
+            h(Check, {
+              key: 'mdns',
+              id: 'web-access-mdns',
+              label: t('mdnsEnabled'),
+              hint: bind === '127.0.0.1' ? t('mdnsNeedsLan') : t('mdnsHint'),
+              checked: draft?.mdnsEnabled === true,
+              disabled: draft === null || bind === '127.0.0.1',
+              onChange: (value) => { patch({ mdnsEnabled: value }) },
+            }),
+            h(Field, {
+              key: 'mdnsName',
+              id: 'web-access-mdns-name',
+              label: t('mdnsName'),
+              hint: t('mdnsNameHint'),
+              children: h('input', {
+                id: 'web-access-mdns-name',
+                type: 'text',
+                value: typeof draft?.mdnsName === 'string' ? draft.mdnsName : 'dsh.local',
+                disabled: draft === null || bind === '127.0.0.1' || draft?.mdnsEnabled !== true,
+                placeholder: 'dsh.local',
+                style: { ...controlStyle, width: '100%' },
+                onChange: (event) => { patch({ mdnsName: event.currentTarget.value.trim() }) },
+              }),
+            }),
             h(Field, {
               key: 'trust',
               id: 'web-access-trust',
@@ -568,12 +626,18 @@ window.__ModuleLoader__.load({
               h('span', { key: 'v6' }, status?.lan?.listening
                 ? `http://${status.lan.address}:${status.lan.port} · 127.0.0.1:${status.lan.port}`
                 : t('lanOff')),
+              h('span', { key: 'k7', style: keyStyle }, t('mdnsLive')),
+              h('span', { key: 'v7' }, status?.mdns?.published
+                ? `http://${status.mdns.name}:${status.mdns.port}`
+                : status?.mdns?.enabled ? t('mdnsPending') : t('mdnsOff')),
               h('span', { key: 'k3', style: keyStyle }, t('liveTrust')),
               h('span', { key: 'v3' }, show(status?.trustLive)),
               h('span', { key: 'k5', style: keyStyle }, t('loginUrl')),
               h('span', { key: 'v5' }, show(status?.loginUrl)),
             ]),
             status?.lan?.error ? h('p', { key: 'lanerr', style: hintStyle }, t('lanError', { error: status.lan.error })) : null,
+            status?.mdns?.error ? h('p', { key: 'mdnserr', style: hintStyle }, t('mdnsError', { error: status.mdns.error })) : null,
+            status?.mdns?.conflict ? h('p', { key: 'mdnsc', style: hintStyle }, t('mdnsConflict')) : null,
             draft?.totpEnabled
               ? h('p', { key: 'gated', style: hintStyle }, t('gatedHint', { url: status?.loginUrl ?? LOGIN_URL_FALLBACK }))
               : null,

@@ -6,7 +6,11 @@
       name: dsh-web-access
       config:
         bind: '127.0.0.1'
+        lanAddress: ''
+        lanPort: 3080
         autoTrustLocalIps: true
         trustedHosts: []
         totpEnabled: false
         totpGate: all
+        mdnsEnabled: false
+        mdnsName: dsh.local

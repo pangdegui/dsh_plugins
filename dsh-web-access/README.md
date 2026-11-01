@@ -30,6 +30,8 @@ settings-form machinery.
 | `bind` | `127.0.0.1` | `127.0.0.1` keeps everything local. `0.0.0.0` turns on the built-in **reverse proxy**: LAN traffic arrives on this machine's LAN address and is forwarded to the loopback listener. It is never written as a wildcard listener — dsh rejects that at startup. |
 | `lanAddress` | `''` | The concrete LAN IPv4 the proxy listens on. Empty picks automatically (192.168/10 before 172.16/12, because Hyper-V and WSL live in the latter). |
 | `lanPort` | `3080` | The fixed LAN port. Stable across restarts and applied live, so a URL you hand to another device keeps working. The application's own loopback port stays launch-assigned and is never exposed. |
+| `mdnsEnabled` | `false` | Publish an mDNS alias for the LAN entry, so `http://<alias>:<lanPort>` keeps working when the address changes. Requires `bind: 0.0.0.0`; the alias joins `trustedHosts` automatically. |
+| `mdnsName` | `dsh.local` | The alias to publish. A bare `dsh` is read as `dsh.local`; labels must be 1-63 letters, digits, or hyphens. |
 | `autoTrustLocalIps` | `true` | While the proxy is on, trust every non-internal IPv4 address of this machine. Turn off to trust only `lanAddress` plus `trustedHosts`. |
 | `trustedHosts` | `[]` | Extra authorities the Host/Origin fence accepts: `host` (any port) or `host:port`. |
 | `totpEnabled` | `false` | Require a one-time code before the login entry hands back the launch token. |
@@ -46,8 +48,9 @@ settings-form machinery.
   persisted, because persisting restarts this plugin's fiber and a response still
   queued across that restart would never reach the browser.
 
-**A live status block** in the panel: current bind, the port in use, the
-authorities currently trusted, the origins another device would reach, the login
+**A live status block** in the panel: current bind, the port in use, the mDNS
+alias and whether it is answering, the authorities currently trusted, the
+origins another device would reach, the login
 URL to type elsewhere, plus show/rotate controls for the key.
 
 It also lists the per-origin **launch-token URLs** (`?token=…`). A bare
@@ -100,6 +103,39 @@ The fence is **not reimplemented**: every route this plugin serves calls
 `/api` bridge uses — so a rebound or cross-site caller is refused before any
 TOTP logic runs. `401` (trusted but anonymous) is what the login page serves;
 `403` is refused outright.
+
+## The `.local` alias (mDNS)
+
+`mdnsEnabled` publishes an A record for `mdnsName` (default `dsh.local`) that
+points at the proxy address, plus an `_http._tcp` service record whose target is
+the alias and whose port is `lanPort`. So `http://dsh.local:3080/dsh-access`
+keeps working when DHCP hands out a different address, and discovery tools can
+browse the entry:
+
+```
+dns-sd -B _http._tcp            # "DeepSeek Harness (dsh.local)"
+```
+
+The alias is written into `trustedHosts` automatically: the fence reads the
+**name** from the Host header, not the address it resolves to, so publishing
+without that row would answer 403.
+
+Implementation notes that matter in practice:
+
+- **Answers are sent from every non-internal IPv4 interface.** A `dgram` socket
+  cannot report which interface a multicast query arrived on, and a resolver
+  drops an answer whose source address is not on its own subnet. Measured on
+  Windows with a VPN adapter present: a response sourced from the VPN address
+  for a query that arrived on Wi-Fi is ignored and resolution fails with
+  NXDOMAIN; answering per interface is what makes it work.
+- **No probing, no conflict defence.** A conflicting A claim for the same name
+  is reported in the panel instead: pick another name.
+- **Goodbye on stop.** `stop()` sends the same records with TTL 0, so resolvers
+  drop the name immediately rather than waiting out the cache.
+- **Client support.** Windows, macOS, and iOS resolve `.local`; Android's system
+  resolver generally does not, so a phone browser may still need the IP.
+- **The service instance is derived from the alias** (no host name is
+  broadcast), and the record set carries only the login path as TXT.
 
 ## The TOTP flow
 
@@ -168,6 +204,10 @@ it, and it is only ever returned by `/dsh-access/setup` behind the full cookie.
   application's own credential and bypasses `/dsh-access` entirely; offering it
   next to a one-time-code gate would make the gate decorative. Enable TOTP and
   hand other devices the `/dsh-access` URL (or its QR) instead.
+- **mDNS is an advertisement, not a security boundary.** The alias resolves to
+  the same entry as the IP; `trustedHosts` and the TOTP gate still decide who
+  gets in. It is also link-local: a router that drops multicast, or a guest
+  VLAN, hides the name — use the address there.
 - **Not a TLS-terminating proxy.** The built-in proxy speaks plain HTTP on the
   LAN and forwards bytes; TLS termination, IP allow-lists at the network layer,
   and per-device revocation are out of scope; this plugin operates inside the

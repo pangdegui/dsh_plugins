@@ -27,9 +27,11 @@ import { apply, Config } from '../lib/index.js'
   assert.ok(Array.isArray(config.trustedHosts), 'trustedHosts resolves to an array')
   assert.equal(typeof config.totpEnabled, 'boolean', 'totpEnabled resolves to a boolean')
   assert.equal(config.totpGate, 'all', `totpGate resolves to its default string, got ${JSON.stringify(config.totpGate)}`)
+  assert.equal(config.mdnsEnabled, false, 'mdnsEnabled defaults to off')
+  assert.equal(config.mdnsName, 'dsh.local', `mdnsName defaults to dsh.local, got ${JSON.stringify(config.mdnsName)}`)
 
-  const filled = Config['~standard'].validate({ bind: '0.0.0.0', totpEnabled: true, totpGate: 'remote', autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'] })
-  assert.deepEqual(filled.value, { bind: '0.0.0.0', lanAddress: '', lanPort: 3080, autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'], totpEnabled: true, totpGate: 'remote' }, 'a full config validates to plain values')
+  const filled = Config['~standard'].validate({ bind: '0.0.0.0', totpEnabled: true, totpGate: 'remote', autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'], mdnsEnabled: true, mdnsName: 'lab.local' })
+  assert.deepEqual(filled.value, { bind: '0.0.0.0', lanAddress: '', lanPort: 3080, autoTrustLocalIps: false, trustedHosts: ['10.0.0.5'], totpEnabled: true, totpGate: 'remote', mdnsEnabled: true, mdnsName: 'lab.local' }, 'a full config validates to plain values')
 }
 
 const routes = new Map()
@@ -150,5 +152,20 @@ const toggled = makeRes()
 await route.handler(makeReq('POST', JSON.stringify({ ...fetched.config, autoTrustLocalIps: false })), toggled)
 console.log('POST (autoTrustLocalIps=false) ->', toggled.statusCode, toggled.payload)
 assert.equal(toggled.statusCode, 200, `toggling autoTrustLocalIps must succeed, got ${toggled.statusCode}: ${toggled.payload}`)
+
+// A bare name is normalized to a full `.local` alias before it is persisted.
+const named = makeRes()
+await route.handler(makeReq('POST', JSON.stringify({ ...fetched.config, mdnsEnabled: true, mdnsName: 'Lab' })), named)
+assert.equal(named.statusCode, 200, `naming the alias must succeed, got ${named.statusCode}: ${named.payload}`)
+await new Promise((resolve) => { setImmediate(resolve) })
+await new Promise((resolve) => { setTimeout(resolve, 20) })
+const renamed = edits.at(-1)?.next ?? {}
+assert.equal(renamed.mdnsName, 'lab.local', `the alias normalizes to lab.local, got ${JSON.stringify(renamed.mdnsName)}`)
+assert.equal(renamed.mdnsEnabled, true, 'the alias is enabled in the edited row')
+
+// An illegal label is refused instead of reaching the wire.
+const bad = makeRes()
+await route.handler(makeReq('POST', JSON.stringify({ ...fetched.config, mdnsName: 'bad_name' })), bad)
+assert.equal(bad.statusCode, 400, `an illegal alias is refused, got ${bad.statusCode}: ${bad.payload}`)
 
 console.log('\nall checks passed')

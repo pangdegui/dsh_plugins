@@ -1,7 +1,7 @@
 {
   "name": "dsh-web-access",
-  "version": "0.2.0",
-  "description": "Configurable network access for DeepSeek Harness: listen address, trusted hosts, and an optional TOTP gate in front of the launch token — driven from its own sidebar panel.",
+  "version": "0.3.0",
+  "description": "Configurable network access for DeepSeek Harness: listen address, fixed LAN port, mDNS .local alias, trusted hosts, and an optional TOTP gate in front of the launch token — driven from its own sidebar panel.",
   "type": "module",
   "license": "MIT",
   "engines": {
