@@ -78,11 +78,11 @@
       "versions": [
         {
           "version": "0.2.1",
-          "publishTimestamp": 1792996446,
+          "publishTimestamp": 1792996434,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "98385c710dcf4c61f373362d985abdae72036bef",
+            "commit": "c29bb155e06ef7efc04aed33f3df30a5621d4ecf",
             "path": "dsh-model-proxy"
           }
         }
@@ -120,11 +120,11 @@
       "versions": [
         {
           "version": "0.2.1",
-          "publishTimestamp": 1792996446,
+          "publishTimestamp": 1792996434,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "98385c710dcf4c61f373362d985abdae72036bef",
+            "commit": "c29bb155e06ef7efc04aed33f3df30a5621d4ecf",
             "path": "dsh-session-delete"
           }
         }
@@ -162,12 +162,12 @@
       },
       "versions": [
         {
-          "version": "0.2.0",
-          "publishTimestamp": 1792469409,
+          "version": "0.3.0",
+          "publishTimestamp": 1793533745,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "1076c98c42fb4090d0ba3a4daa4fec606071384b",
+            "commit": "c29bb155e06ef7efc04aed33f3df30a5621d4ecf",
             "path": "dsh-web-access"
           }
         }
@@ -206,11 +206,11 @@
       "versions": [
         {
           "version": "0.4.3",
-          "publishTimestamp": 1792996446,
+          "publishTimestamp": 1792996434,
           "source": {
             "type": "git",
             "url": "https://github.com/pangdegui/dsh_plugins",
-            "commit": "98385c710dcf4c61f373362d985abdae72036bef",
+            "commit": "c29bb155e06ef7efc04aed33f3df30a5621d4ecf",
             "path": "dsh-workbuddy"
           }
         }
